@@ -18,9 +18,19 @@ interface Email2OrderParserInterface
 	 * Expected output keys:
 	 * - supplier_reference: string
 	 * - original_sender_email: string
+	 * - order_date: int|null
 	 * - delivery_date: int|null
 	 * - currency: string
 	 * - lines: array<int,array<string,mixed>>
+	 *
+	 * Normalized line keys currently used by the order builder:
+	 * - supplier_product_ref: string
+	 * - manufacturer_ref: string (optional metadata, not auto-matched yet)
+	 * - label: string
+	 * - qty: float
+	 * - unit: string
+	 * - unit_price: float (net)
+	 * - vat_rate: float
 	 *
 	 * @param array<string,mixed> $message Normalized email input
 	 * @return array<string,mixed>
