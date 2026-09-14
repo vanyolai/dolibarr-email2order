@@ -2,14 +2,14 @@
 /* Copyright (C) 2026 dolibarr-email2order contributors */
 
 /**
- * Conservative fallback parser. Supplier-specific parsers are tried before
- * the generic extraction rules.
+ * Conservative fallback parser.
+ *
+ * It only extracts generic metadata that can be identified safely. Structured
+ * order lines are handled by dedicated structured parsers selected by the
+ * parser registry.
  */
 class GenericEmail2OrderParser implements Email2OrderParserInterface
 {
-	/** @var string Effective parser identifier */
-	private $activeParserName = 'generic';
-
 	/** @inheritdoc */
 	public function supports(array $message): bool
 	{
@@ -19,24 +19,12 @@ class GenericEmail2OrderParser implements Email2OrderParserInterface
 	/** @inheritdoc */
 	public function getName(): string
 	{
-		return $this->activeParserName;
+		return 'generic';
 	}
 
 	/** @inheritdoc */
 	public function parse(array $message): array
 	{
-		// Keep the action hook simple for now: supplier-specific parsers are
-		// delegated from this fallback parser until a dedicated registry exists.
-		dol_include_once('/email2order/class/parser/emileemail2orderparser.class.php');
-		if (class_exists('EmileEmail2OrderParser')) {
-			$emileParser = new EmileEmail2OrderParser();
-			if ($emileParser->supports($message)) {
-				$this->activeParserName = $emileParser->getName();
-				return $emileParser->parse($message);
-			}
-		}
-
-		$this->activeParserName = 'generic';
 		$subject = (string) ($message['subject'] ?? '');
 		$body = (string) ($message['body'] ?? '');
 		$header = (string) ($message['header'] ?? '');
@@ -44,6 +32,7 @@ class GenericEmail2OrderParser implements Email2OrderParserInterface
 		return array(
 			'supplier_reference' => $this->extractSupplierReference($subject."\n".$body),
 			'original_sender_email' => $this->extractOriginalSender($body."\n".$header),
+			'order_date' => null,
 			'delivery_date' => null,
 			'currency' => '',
 			'lines' => array(),
