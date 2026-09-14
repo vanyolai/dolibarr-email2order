@@ -1,0 +1,15 @@
+name: PHP lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  php-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Lint PHP files
+        run: find . -type f -name '*.php' -print0 | xargs -0 -n1 php -l
