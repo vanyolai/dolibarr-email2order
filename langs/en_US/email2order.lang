@@ -1,0 +1,8 @@
+Email2OrderDescription=Create supplier orders from supplier confirmation emails collected by Dolibarr
+Email2OrderDescriptionLong=Uses Dolibarr Email Collector hooks to turn supplier confirmations into draft supplier orders without patching core files.
+Email2OrderCollectorAction=Create draft supplier order from email (Email2Order)
+Email2OrderSupplierNotFound=Email2Order could not identify exactly one Dolibarr supplier from this email. No order was created.
+Email2OrderAlreadyImported=This email was already imported as supplier order ID %s.
+Email2OrderImportTableError=Email2Order could not read or update its import registry.
+Email2OrderCreateFailed=Email2Order could not create the draft supplier order.
+Email2OrderCreated=Email2Order created draft supplier order %s.

@@ -1,0 +1,8 @@
+Email2OrderDescription=Beszállítói rendelés-visszaigazoló e-mailekből beszállítói rendeléseket hoz létre
+Email2OrderDescriptionLong=A Dolibarr Email Collector hookjaira építve, core módosítás nélkül hoz létre draft beszállítói rendeléseket a beérkező visszaigazolásokból.
+Email2OrderCollectorAction=Draft beszállítói rendelés létrehozása e-mailből (Email2Order)
+Email2OrderSupplierNotFound=Az Email2Order nem tudott pontosan egy Dolibarr-beszállítót azonosítani az e-mailből. Rendelés nem jött létre.
+Email2OrderAlreadyImported=Ez az e-mail már importálva lett a(z) %s azonosítójú beszállítói rendelésként.
+Email2OrderImportTableError=Az Email2Order nem tudta olvasni vagy frissíteni az import-nyilvántartást.
+Email2OrderCreateFailed=Az Email2Order nem tudta létrehozni a draft beszállítói rendelést.
+Email2OrderCreated=Az Email2Order létrehozta a(z) %s draft beszállítói rendelést.
