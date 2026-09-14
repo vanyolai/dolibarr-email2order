@@ -101,6 +101,7 @@ class ActionsEmail2Order extends CommonHookActions
 		}
 		$effectiveSender = !empty($parsed['original_sender_email']) ? (string) $parsed['original_sender_email'] : $currentSender;
 
+		// First prefer an exact supplier/company or supplier/contact email match.
 		if ($supplierId <= 0) {
 			foreach (array_unique($senderCandidates) as $candidateEmail) {
 				$supplierId = $this->findSupplierByEmail($candidateEmail);
@@ -108,6 +109,15 @@ class ActionsEmail2Order extends CommonHookActions
 					break;
 				}
 			}
+		}
+
+		// Technical webshop senders (noreply@, orders@, etc.) often differ from
+		// the business email stored on the Dolibarr supplier. For a structured,
+		// positively identified parser only, fall back to the sender domain. The
+		// domain must resolve to exactly one supplier and public mail domains are
+		// never accepted for this fallback.
+		if ($supplierId <= 0 && $this->allowsSupplierDomainFallback($parser)) {
+			$supplierId = $this->findSupplierByEmailDomain($effectiveSender);
 		}
 
 		if ($supplierId <= 0) {
@@ -367,6 +377,102 @@ class ActionsEmail2Order extends CommonHookActions
 
 		$obj = $this->db->fetch_object($resql);
 		return $obj ? (int) $obj->rowid : 0;
+	}
+
+	/**
+	 * Only structured parsers may use domain-based supplier resolution. The
+	 * generic parser is deliberately excluded because it has not positively
+	 * identified a known supplier message format.
+	 *
+	 * @param Email2OrderParserInterface $parser Selected parser
+	 * @return bool
+	 */
+	private function allowsSupplierDomainFallback(Email2OrderParserInterface $parser): bool
+	{
+		$name = $parser->getName();
+		return $name === 'emile' || strpos($name, 'html-profile:') === 0;
+	}
+
+	/**
+	 * Resolve a structured supplier message by email domain when the exact
+	 * technical sender address is not stored in Dolibarr. A domain is accepted
+	 * only if exactly one supplier company/contact uses it.
+	 *
+	 * Public mailbox providers are explicitly excluded because a unique match in
+	 * today's data would not make such a domain a reliable supplier identity.
+	 *
+	 * @param string $email Effective/original sender email
+	 * @return int Supplier id, 0 when unsafe, not found or ambiguous
+	 */
+	private function findSupplierByEmailDomain(string $email): int
+	{
+		global $conf;
+
+		$email = strtolower(trim($email));
+		$at = strrpos($email, '@');
+		if ($at === false) {
+			return 0;
+		}
+
+		$domain = substr($email, $at + 1);
+		if ($domain === '' || preg_match('/^[a-z0-9.-]+\.[a-z]{2,}$/', $domain) !== 1) {
+			return 0;
+		}
+
+		$publicDomains = array(
+			'gmail.com',
+			'googlemail.com',
+			'outlook.com',
+			'hotmail.com',
+			'live.com',
+			'yahoo.com',
+			'icloud.com',
+			'me.com',
+			'mac.com',
+			'proton.me',
+			'protonmail.com',
+			'aol.com',
+			'gmx.com',
+			'gmx.de',
+			'freemail.hu',
+			'citromail.hu',
+			'indamail.hu',
+		);
+		if (in_array($domain, $publicDomains, true)) {
+			dol_syslog('Email2Order: supplier domain fallback blocked for public domain '.$domain, LOG_INFO);
+			return 0;
+		}
+
+		$suffix = '%@'.$domain;
+		$escapedSuffix = $this->db->escape($suffix);
+
+		$sql = 'SELECT DISTINCT s.rowid';
+		$sql .= ' FROM '.MAIN_DB_PREFIX.'societe AS s';
+		$sql .= ' LEFT JOIN '.MAIN_DB_PREFIX.'socpeople AS sp ON sp.fk_soc = s.rowid';
+		$sql .= ' WHERE s.entity = '.((int) $conf->entity);
+		$sql .= ' AND s.fournisseur > 0';
+		$sql .= " AND (LOWER(s.email) LIKE '".$escapedSuffix."' OR LOWER(sp.email) LIKE '".$escapedSuffix."')";
+
+		$resql = $this->db->query($sql);
+		if (!$resql) {
+			dol_syslog('Email2Order: supplier domain lookup failed for '.$domain.': '.$this->db->lasterror(), LOG_ERR);
+			return 0;
+		}
+
+		$count = $this->db->num_rows($resql);
+		if ($count !== 1) {
+			if ($count > 1) {
+				dol_syslog('Email2Order: supplier domain '.$domain.' is ambiguous across '.$count.' suppliers', LOG_WARNING);
+			}
+			return 0;
+		}
+
+		$obj = $this->db->fetch_object($resql);
+		$supplierId = $obj ? (int) $obj->rowid : 0;
+		if ($supplierId > 0) {
+			dol_syslog('Email2Order: resolved supplier id='.$supplierId.' by unique email domain '.$domain, LOG_INFO);
+		}
+		return $supplierId;
 	}
 
 	/**
