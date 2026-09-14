@@ -124,7 +124,9 @@ class EmileEmail2OrderParser implements Email2OrderParserInterface
 	/**
 	 * Parse the first worksheet of the E-mile XLSX attachment.
 	 *
-	 * Expected columns are identified from the header row, not fixed indexes.
+	 * The reader deliberately does not require ext-zip or SimpleXML. It uses
+	 * ZipArchive when available, otherwise the standard PharData ZIP reader,
+	 * and parses the small XLSX XML parts without optional XML extensions.
 	 *
 	 * @param string $content Raw XLSX bytes
 	 * @return array{lines:array<int,array<string,mixed>>,currency:string}
@@ -132,12 +134,14 @@ class EmileEmail2OrderParser implements Email2OrderParserInterface
 	private function parseOrderXlsx(string $content): array
 	{
 		$result = array('lines' => array(), 'currency' => '');
-		if (!class_exists('ZipArchive') || !function_exists('simplexml_load_string')) {
+		$tmpBase = tempnam(sys_get_temp_dir(), 'email2order_xlsx_');
+		if ($tmpBase === false) {
 			return $result;
 		}
-
-		$tmp = tempnam(sys_get_temp_dir(), 'email2order_xlsx_');
-		if ($tmp === false) {
+		$tmp = $tmpBase.'.xlsx';
+		@unlink($tmp);
+		if (!@rename($tmpBase, $tmp)) {
+			@unlink($tmpBase);
 			return $result;
 		}
 
@@ -146,19 +150,14 @@ class EmileEmail2OrderParser implements Email2OrderParserInterface
 				return $result;
 			}
 
-			$zip = new ZipArchive();
-			if ($zip->open($tmp) !== true) {
+			$entries = $this->readXlsxEntries($tmp);
+			$sheetXml = $entries['sheet'];
+			if ($sheetXml === '') {
 				return $result;
 			}
 
-			$sharedStrings = $this->readSharedStrings($zip);
-			$sheetXml = $zip->getFromName('xl/worksheets/sheet1.xml');
-			$zip->close();
-			if (!is_string($sheetXml) || $sheetXml === '') {
-				return $result;
-			}
-
-			$rows = $this->readWorksheetRows($sheetXml, $sharedStrings);
+			$sharedStrings = $this->readSharedStringsXml($entries['shared_strings']);
+			$rows = $this->readWorksheetRowsXml($sheetXml, $sharedStrings);
 			if (count($rows) < 2) {
 				return $result;
 			}
@@ -208,33 +207,67 @@ class EmileEmail2OrderParser implements Email2OrderParserInterface
 	}
 
 	/**
-	 * @param ZipArchive $zip XLSX archive
+	 * @param string $filename Temporary XLSX file
+	 * @return array{shared_strings:string,sheet:string}
+	 */
+	private function readXlsxEntries(string $filename): array
+	{
+		$result = array('shared_strings' => '', 'sheet' => '');
+
+		if (class_exists('ZipArchive')) {
+			$zip = new ZipArchive();
+			if ($zip->open($filename) === true) {
+				$shared = $zip->getFromName('xl/sharedStrings.xml');
+				$sheet = $zip->getFromName('xl/worksheets/sheet1.xml');
+				$zip->close();
+				$result['shared_strings'] = is_string($shared) ? $shared : '';
+				$result['sheet'] = is_string($sheet) ? $sheet : '';
+				return $result;
+			}
+		}
+
+		if (class_exists('PharData')) {
+			try {
+				$archive = new PharData($filename);
+				if (isset($archive['xl/sharedStrings.xml'])) {
+					$result['shared_strings'] = (string) $archive['xl/sharedStrings.xml']->getContent();
+				}
+				if (isset($archive['xl/worksheets/sheet1.xml'])) {
+					$result['sheet'] = (string) $archive['xl/worksheets/sheet1.xml']->getContent();
+				}
+			} catch (Throwable $e) {
+				// Invalid/unsupported archive. Caller will return an empty result.
+			}
+		}
+
+		return $result;
+	}
+
+	/**
+	 * @param string $xml sharedStrings.xml
 	 * @return array<int,string>
 	 */
-	private function readSharedStrings(ZipArchive $zip): array
+	private function readSharedStringsXml(string $xml): array
 	{
-		$xml = $zip->getFromName('xl/sharedStrings.xml');
-		if (!is_string($xml) || $xml === '') {
+		if ($xml === '') {
 			return array();
 		}
 
-		$root = @simplexml_load_string($xml);
-		if ($root === false) {
-			return array();
-		}
-
-		$ns = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
 		$strings = array();
-		foreach ($root->children($ns)->si as $si) {
-			$children = $si->children($ns);
-			$text = isset($children->t) ? (string) $children->t : '';
-			if ($text === '') {
-				foreach ($children->r as $run) {
-					$text .= (string) $run->children($ns)->t;
+		if (!preg_match_all('/<si\b[^>]*>(.*?)<\/si>/si', $xml, $items)) {
+			return $strings;
+		}
+
+		foreach ($items[1] as $item) {
+			$text = '';
+			if (preg_match_all('/<t\b[^>]*>(.*?)<\/t>/si', (string) $item, $texts)) {
+				foreach ($texts[1] as $value) {
+					$text .= $this->decodeXmlText((string) $value);
 				}
 			}
 			$strings[] = $text;
 		}
+
 		return $strings;
 	}
 
@@ -243,39 +276,63 @@ class EmileEmail2OrderParser implements Email2OrderParserInterface
 	 * @param array<int,string> $sharedStrings Shared-string table
 	 * @return array<int,array<string,mixed>> Rows indexed by Excel column letter
 	 */
-	private function readWorksheetRows(string $xml, array $sharedStrings): array
+	private function readWorksheetRowsXml(string $xml, array $sharedStrings): array
 	{
-		$root = @simplexml_load_string($xml);
-		if ($root === false) {
-			return array();
+		$rows = array();
+		if (!preg_match_all('/<row\b[^>]*>(.*?)<\/row>/si', $xml, $rowMatches)) {
+			return $rows;
 		}
 
-		$ns = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
-		$rows = array();
-		$sheetChildren = $root->children($ns);
-		foreach ($sheetChildren->sheetData->row as $row) {
+		foreach ($rowMatches[1] as $rowXml) {
 			$values = array();
-			foreach ($row->children($ns)->c as $cell) {
-				$ref = (string) $cell['r'];
-				$column = preg_replace('/\d+/', '', $ref);
-				if (!is_string($column) || $column === '') {
-					continue;
+			if (preg_match_all('/<c\b([^>]*)>(.*?)<\/c>/si', (string) $rowXml, $cellMatches, PREG_SET_ORDER)) {
+				foreach ($cellMatches as $cellMatch) {
+					$attributes = (string) $cellMatch[1];
+					$cellXml = (string) $cellMatch[2];
+
+					if (!preg_match('/\br="([A-Z]+)[0-9]+"/i', $attributes, $refMatch)) {
+						continue;
+					}
+					$column = strtoupper((string) $refMatch[1]);
+
+					$type = '';
+					if (preg_match('/\bt="([^"]+)"/i', $attributes, $typeMatch)) {
+						$type = (string) $typeMatch[1];
+					}
+
+					$value = '';
+					if ($type === 'inlineStr') {
+						if (preg_match_all('/<t\b[^>]*>(.*?)<\/t>/si', $cellXml, $inlineTexts)) {
+							foreach ($inlineTexts[1] as $inlineText) {
+								$value .= $this->decodeXmlText((string) $inlineText);
+							}
+						}
+					} elseif (preg_match('/<v\b[^>]*>(.*?)<\/v>/si', $cellXml, $valueMatch)) {
+						$value = $this->decodeXmlText((string) $valueMatch[1]);
+					}
+
+					if ($type === 's' && $value !== '') {
+						$value = $sharedStrings[(int) $value] ?? '';
+					} elseif ($value !== '' && is_numeric($value)) {
+						$value = (float) $value;
+					}
+
+					$values[$column] = $value;
 				}
-				$type = (string) $cell['t'];
-				$cellChildren = $cell->children($ns);
-				$value = isset($cellChildren->v) ? (string) $cellChildren->v : '';
-				if ($type === 's' && $value !== '') {
-					$value = $sharedStrings[(int) $value] ?? '';
-				} elseif ($type === 'inlineStr' && isset($cellChildren->is)) {
-					$value = (string) $cellChildren->is->children($ns)->t;
-				} elseif ($value !== '' && is_numeric($value)) {
-					$value = (float) $value;
-				}
-				$values[$column] = $value;
 			}
 			$rows[] = $values;
 		}
+
 		return $rows;
+	}
+
+	/**
+	 * @param string $value XML character data
+	 * @return string
+	 */
+	private function decodeXmlText(string $value): string
+	{
+		return html_entity_decode(strip_tags($value), ENT_QUOTES | ENT_XML1, 'UTF-8');
 	}
 
 	/**
