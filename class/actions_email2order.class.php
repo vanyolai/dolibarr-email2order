@@ -147,7 +147,7 @@ class ActionsEmail2Order extends CommonHookActions
 
 		$orderId = $order->create($user);
 		if ($orderId <= 0) {
-			return $this->fail($langs->trans('Email2OrderCreateFailed').' '.$order->error.' '.implode(' ', $order->errors));
+			return $this->fail($langs->trans('Email2OrderCreateFailed').' '.$order->error.' '.implode(' ', (array) $order->errors));
 		}
 
 		// Ensure ref is populated before using the supplier-order document directory.
@@ -360,7 +360,7 @@ class ActionsEmail2Order extends CommonHookActions
 				$supplierRef
 			);
 			if ($result <= 0) {
-				return $this->fail('Email2Order: failed to add supplier-order line: '.$order->error.' '.implode(' ', $order->errors));
+				return $this->fail('Email2Order: failed to add supplier-order line: '.$order->error.' '.implode(' ', (array) $order->errors));
 			}
 		}
 
@@ -419,8 +419,11 @@ class ActionsEmail2Order extends CommonHookActions
 		}
 
 		$destdir = $conf->fournisseur->commande->dir_output.'/'.dol_sanitizeFileName($order->ref);
-		if (!dol_is_dir($destdir) && !dol_mkdir($destdir)) {
-			return $this->fail('Email2Order: cannot create attachment directory '.$destdir);
+		if (!dol_is_dir($destdir)) {
+			$mkdirResult = dol_mkdir($destdir);
+			if ($mkdirResult < 0) {
+				return $this->fail('Email2Order: cannot create attachment directory '.$destdir);
+			}
 		}
 
 		foreach ($attachments as $key => $attachment) {
