@@ -2,14 +2,17 @@
 /* Copyright (C) 2026 dolibarr-email2order contributors */
 
 /**
- * Conservative fallback parser.
+ * Parser facade with a conservative generic fallback.
  *
- * It only extracts generic metadata that can be identified safely. Structured
- * order lines are handled by dedicated structured parsers selected by the
- * parser registry.
+ * The Email Collector hook currently instantiates this class directly. It
+ * delegates structured messages to the XLSX/profile parsers and only uses the
+ * generic extraction rules when no structured parser claims the message.
  */
 class GenericEmail2OrderParser implements Email2OrderParserInterface
 {
+	/** @var string Effective parser identifier */
+	private $activeParserName = 'generic';
+
 	/** @inheritdoc */
 	public function supports(array $message): bool
 	{
@@ -19,12 +22,32 @@ class GenericEmail2OrderParser implements Email2OrderParserInterface
 	/** @inheritdoc */
 	public function getName(): string
 	{
-		return 'generic';
+		return $this->activeParserName;
 	}
 
 	/** @inheritdoc */
 	public function parse(array $message): array
 	{
+		dol_include_once('/email2order/class/parser/emileemail2orderparser.class.php');
+		if (class_exists('EmileEmail2OrderParser')) {
+			$parser = new EmileEmail2OrderParser();
+			if ($parser->supports($message)) {
+				$this->activeParserName = $parser->getName();
+				return $parser->parse($message);
+			}
+		}
+
+		dol_include_once('/email2order/class/parser/profiledhtmlemail2orderparser.class.php');
+		if (class_exists('ProfiledHtmlEmail2OrderParser')) {
+			$parser = new ProfiledHtmlEmail2OrderParser();
+			if ($parser->supports($message)) {
+				$result = $parser->parse($message);
+				$this->activeParserName = $parser->getName();
+				return $result;
+			}
+		}
+
+		$this->activeParserName = 'generic';
 		$subject = (string) ($message['subject'] ?? '');
 		$body = (string) ($message['body'] ?? '');
 		$header = (string) ($message['header'] ?? '');
@@ -52,7 +75,6 @@ class GenericEmail2OrderParser implements Email2OrderParserInterface
 		foreach ($patterns as $pattern) {
 			if (preg_match($pattern, $text, $matches)) {
 				$candidate = trim((string) $matches[1]);
-				// Avoid treating ordinary words as references.
 				if (preg_match('/\d/', $candidate)) {
 					return $candidate;
 				}
