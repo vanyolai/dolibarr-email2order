@@ -99,6 +99,7 @@ class ActionsEmail2Order extends CommonHookActions
 		if ($currentSender !== '') {
 			$senderCandidates[] = $currentSender;
 		}
+		$effectiveSender = !empty($parsed['original_sender_email']) ? (string) $parsed['original_sender_email'] : $currentSender;
 
 		if ($supplierId <= 0) {
 			foreach (array_unique($senderCandidates) as $candidateEmail) {
@@ -110,14 +111,15 @@ class ActionsEmail2Order extends CommonHookActions
 		}
 
 		if ($supplierId <= 0) {
+			$this->appendDiagnostic($object, $message, $parser, $parsed, 0, $currentSender, $effectiveSender, null);
 			return $this->fail($langs->trans('Email2OrderSupplierNotFound'));
 		}
 
 		$messageId = $this->extractMessageId((string) $message['header']);
-		$effectiveSender = !empty($parsed['original_sender_email']) ? (string) $parsed['original_sender_email'] : $currentSender;
 		$messageHash = $this->buildMessageHash($effectiveSender, (string) $message['subject'], (string) $message['body']);
 
 		$existingOrderId = $this->findExistingImport($messageHash);
+		$this->appendDiagnostic($object, $message, $parser, $parsed, $supplierId, $currentSender, $effectiveSender, $existingOrderId);
 		if ($existingOrderId > 0) {
 			$this->resprints = $langs->trans('Email2OrderAlreadyImported', $existingOrderId);
 			dol_syslog('Email2Order: email already imported as supplier order id='.$existingOrderId, LOG_INFO);
@@ -185,6 +187,129 @@ class ActionsEmail2Order extends CommonHookActions
 		dol_syslog('Email2Order: created draft supplier order id='.$orderId.' ref='.$order->ref.' from email hash='.$messageHash, LOG_INFO);
 
 		return 0;
+	}
+
+	/**
+	 * Append a concise Email2Order parse summary to Email Collector debug output.
+	 * This intentionally contains metadata only, not the full message body.
+	 *
+	 * @param CommonObject $collector EmailCollector object
+	 * @param array<string,mixed> $message Normalized email
+	 * @param Email2OrderParserInterface $parser Selected parser
+	 * @param array<string,mixed> $parsed Parsed result
+	 * @param int $supplierId Matched supplier id, 0 if unresolved
+	 * @param string $currentSender Envelope/current From email
+	 * @param string $effectiveSender Effective/original sender used by Email2Order
+	 * @param int|null $existingOrderId Existing imported order id, 0 when new, -1 on lookup error, null before lookup
+	 * @return void
+	 */
+	private function appendDiagnostic(&$collector, array $message, Email2OrderParserInterface $parser, array $parsed, int $supplierId, string $currentSender, string $effectiveSender, ?int $existingOrderId): void
+	{
+		if (!is_object($collector) || !property_exists($collector, 'debuginfo')) {
+			return;
+		}
+
+		$supplierLabel = 'NOT RESOLVED';
+		if ($supplierId > 0) {
+			$supplier = new Societe($this->db);
+			if ($supplier->fetch($supplierId) > 0) {
+				$name = trim((string) (!empty($supplier->name) ? $supplier->name : $supplier->nom));
+				$supplierLabel = ($name !== '' ? $name.' ' : '').'(#'.$supplierId.')';
+			} else {
+				$supplierLabel = '#'.$supplierId;
+			}
+		}
+
+		$attachmentNames = $this->getAttachmentNames($message['attachments'] ?? array());
+		$lines = (array) ($parsed['lines'] ?? array());
+		$currency = trim((string) ($parsed['currency'] ?? ''));
+		$supplierReference = trim((string) ($parsed['supplier_reference'] ?? ''));
+
+		$debug = '<br><strong>Email2Order diagnostic</strong>';
+		$debug .= '<br>Parser: '.dol_escape_htmltag($parser->getName());
+		$debug .= '<br>Current sender: '.dol_escape_htmltag($currentSender !== '' ? $currentSender : '(none)');
+		$debug .= '<br>Effective/original sender: '.dol_escape_htmltag($effectiveSender !== '' ? $effectiveSender : '(none)');
+		$debug .= '<br>Supplier: '.dol_escape_htmltag($supplierLabel);
+		$debug .= '<br>Supplier reference: '.dol_escape_htmltag($supplierReference !== '' ? $supplierReference : '(none)');
+		$debug .= '<br>Currency: '.dol_escape_htmltag($currency !== '' ? $currency : '(not parsed)');
+		$debug .= '<br>Attachments: '.dol_escape_htmltag(!empty($attachmentNames) ? implode(', ', $attachmentNames) : '(none)');
+		$debug .= '<br>Parsed lines: '.count($lines);
+
+		if ($existingOrderId !== null) {
+			if ($existingOrderId > 0) {
+				$debug .= '<br>Deduplication: already imported as supplier order #'.((int) $existingOrderId);
+			} elseif ($existingOrderId === 0) {
+				$debug .= '<br>Deduplication: new message';
+			} else {
+				$debug .= '<br>Deduplication: lookup error';
+			}
+		}
+
+		foreach ($lines as $index => $line) {
+			$qty = isset($line['qty']) ? (float) $line['qty'] : 0.0;
+			$supplierRef = trim((string) ($line['supplier_product_ref'] ?? ''));
+			$unit = trim((string) ($line['unit'] ?? ''));
+			$unitPrice = isset($line['unit_price']) ? (float) $line['unit_price'] : 0.0;
+			$vatRate = isset($line['vat_rate']) ? (float) $line['vat_rate'] : 0.0;
+			$label = trim((string) ($line['label'] ?? ''));
+			$matchText = 'not checked';
+
+			if ($supplierId > 0 && $supplierRef !== '' && $qty > 0) {
+				$productMatch = $this->findSupplierProduct($supplierId, $supplierRef, $qty);
+				if (!empty($productMatch)) {
+					$matchText = 'product #'.((int) ($productMatch['fk_product'] ?? 0)).', supplier price #'.((int) ($productMatch['rowid'] ?? 0));
+				} else {
+					$matchText = 'no Dolibarr supplier-product match; free line';
+				}
+			} elseif ($supplierRef === '') {
+				$matchText = 'no supplier product reference; free line';
+			}
+
+			$lineText = '#'.($index + 1)
+				.' ref='.(($supplierRef !== '') ? $supplierRef : '(none)')
+				.' | qty='.$qty.(($unit !== '') ? ' '.$unit : '')
+				.' | net unit='.$unitPrice.(($currency !== '') ? ' '.$currency : '')
+				.' | VAT='.$vatRate.'%'
+				.' | '.$matchText;
+			if ($label !== '') {
+				$lineText .= ' | '.dol_trunc($label, 120);
+			}
+			$debug .= '<br>&nbsp;&nbsp;'.dol_escape_htmltag($lineText);
+		}
+
+		$collector->debuginfo .= $debug;
+		dol_syslog('Email2Order diagnostic: parser='.$parser->getName().' sender='.$effectiveSender.' supplier='.$supplierId.' supplier_ref='.$supplierReference.' lines='.count($lines).' attachments='.implode(',', $attachmentNames), LOG_INFO);
+	}
+
+	/**
+	 * Return attachment names for diagnostics without touching attachment content.
+	 *
+	 * @param mixed $attachments Email Collector attachment collection
+	 * @return string[]
+	 */
+	private function getAttachmentNames($attachments): array
+	{
+		$names = array();
+		if (!is_array($attachments) && !($attachments instanceof Traversable)) {
+			return $names;
+		}
+
+		foreach ($attachments as $key => $attachment) {
+			$filename = is_string($key) ? $key : '';
+			if (is_object($attachment)) {
+				if (method_exists($attachment, 'getName')) {
+					$filename = (string) $attachment->getName();
+				} elseif (method_exists($attachment, 'getFilename')) {
+					$filename = (string) $attachment->getFilename();
+				}
+			}
+			$filename = trim($filename);
+			if ($filename !== '') {
+				$names[] = $filename;
+			}
+		}
+
+		return $names;
 	}
 
 	/**
