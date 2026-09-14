@@ -4,11 +4,11 @@
 dol_include_once('/email2order/class/extractor/htmlorderextractor.class.php');
 
 /**
- * Profile-driven parser for structured HTML order confirmations.
+ * Profile-driven parser for structured supplier order confirmations.
  *
- * Supplier differences live in declarative profiles (sender/subject hints,
- * table headers and field extraction rules). The DOM/table extraction and
- * normalization code is shared by all profiles.
+ * HTML table handling is shared. Supplier differences are declarative where
+ * possible. A conservative profile-specific plain-text fallback is available
+ * for forwarded messages where the mail client flattens the original HTML.
  */
 class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 {
@@ -51,13 +51,25 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 		$this->activeProfile = (string) $profile['id'];
 		$body = (string) ($message['body'] ?? '');
 		$subject = (string) ($message['subject'] ?? '');
-		$header = (string) ($message['header'] ?? '');
 		$text = $this->extractor->toText($body);
 		$combinedText = $subject."\n".$text;
 
-		$tables = $this->extractor->extractTables($body);
+		// Prefer the original decoded HTML MIME part if Dolibarr Email Collector
+		// kept it in its global while passing only plain messagetext to the hook.
+		$htmlBody = $body;
+		if (isset($GLOBALS['htmlmsg']) && is_string($GLOBALS['htmlmsg']) && trim($GLOBALS['htmlmsg']) !== '') {
+			$htmlBody = $GLOBALS['htmlmsg'];
+		}
+
+		$tables = $this->extractor->extractTables($htmlBody);
 		$tableMatch = $this->extractor->findTableByHeaderPatterns($tables, (array) ($profile['table_header_patterns'] ?? array()));
-		$lines = $tableMatch !== null ? $this->parseLines($tableMatch, $profile) : array();
+		$lines = $tableMatch !== null ? $this->parseHtmlLines($tableMatch, $profile) : array();
+
+		// Forwarding clients may flatten the supplier's HTML table. Fall back only
+		// to deterministic profile-specific text rules; never guess arbitrary rows.
+		if (empty($lines)) {
+			$lines = $this->parsePlainTextLines($combinedText, $profile);
+		}
 
 		return array(
 			'supplier_reference' => $this->extractFirst($combinedText, (array) ($profile['supplier_reference_regexes'] ?? array())),
@@ -104,8 +116,6 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 						break;
 					}
 				}
-				// Forwarded subjects may be localized/rewritten, so domain identity
-				// remains sufficient if the supplier appears in the forwarded body.
 				if (!$hintMatched && strpos($haystack, 'fwd:') === false && strpos($haystack, 'fw:') === false) {
 					continue;
 				}
@@ -138,7 +148,7 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 	 * @param array<string,mixed> $profile Profile
 	 * @return array<int,array<string,mixed>>
 	 */
-	private function parseLines(array $tableMatch, array $profile): array
+	private function parseHtmlLines(array $tableMatch, array $profile): array
 	{
 		$table = (array) ($tableMatch['table'] ?? array());
 		$rows = (array) ($table['rows'] ?? array());
@@ -156,7 +166,7 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 
 		$lines = array();
 		for ($rowIndex = $headerIndex + 1, $count = count($rows); $rowIndex < $count; $rowIndex++) {
-			$cells = (array) (($rows[$rowIndex]['cells'] ?? array()));
+			$cells = (array) ($rows[$rowIndex]['cells'] ?? array());
 			if (empty($cells)) {
 				continue;
 			}
@@ -167,91 +177,140 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 			$priceText = $this->cellText($cells, (int) ($columns['unit_price'] ?? -1));
 			$vatText = $this->cellText($cells, (int) ($columns['vat'] ?? -1));
 
-			$qty = $this->parseQuantity($qtyText);
-			if ($qty <= 0 || $productText === '') {
-				continue;
+			$line = $this->buildLine($productText, $qtyText, $unitText, $priceText, $vatText, $profile);
+			if ($line !== null) {
+				$lines[] = $line;
 			}
-
-			$supplierProductRef = '';
-			if (!empty($profile['product_ref_is_product_cell'])) {
-				$supplierProductRef = trim($productText);
-			} elseif (!empty($profile['product_ref_regex'])) {
-				$supplierProductRef = $this->extractFirst($productText, array((string) $profile['product_ref_regex']));
-			}
-
-			$manufacturerRef = '';
-			if (!empty($profile['manufacturer_ref_regex'])) {
-				$manufacturerRef = $this->extractFirst($productText, array((string) $profile['manufacturer_ref_regex']));
-				if (strtoupper($manufacturerRef) === 'N/A') {
-					$manufacturerRef = '';
-				}
-			}
-
-			$priceSource = $priceText;
-			if (($profile['unit_price_source'] ?? '') === 'product') {
-				$priceSource = $productText;
-			}
-			$unitPrice = $this->extractUnitPrice($priceSource, $profile);
-			if ($unitPrice < 0) {
-				continue;
-			}
-
-			$vatRate = isset($profile['default_vat']) ? (float) $profile['default_vat'] : 0.0;
-			if ($vatText !== '') {
-				$parsedVat = $this->extractPercent($vatText);
-				if ($parsedVat !== null) {
-					$vatRate = $parsedVat;
-				}
-			} elseif (($profile['vat_source'] ?? '') === 'unit_price') {
-				$parsedVat = $this->extractPercent($priceSource);
-				if ($parsedVat !== null) {
-					$vatRate = $parsedVat;
-				}
-			}
-
-			$label = $this->cleanupLabel($productText, (array) ($profile['label_strip_patterns'] ?? array()));
-			$unit = $unitText !== '' ? $this->cleanupUnit($unitText) : $this->extractUnitFromQuantity($qtyText);
-
-			$lines[] = array(
-				'supplier_product_ref' => $supplierProductRef,
-				'manufacturer_ref' => $manufacturerRef,
-				'label' => $label,
-				'qty' => $qty,
-				'unit' => $unit,
-				'unit_price' => $unitPrice,
-				'vat_rate' => $vatRate,
-			);
 		}
 
 		return $lines;
 	}
 
 	/**
-	 * @param array<int,array{text:string,html:string}> $cells Cells
-	 * @param int $index Index
-	 * @return string
+	 * Conservative text fallbacks used only when no HTML table yielded lines.
+	 *
+	 * @param string $text Normalized forwarded message text
+	 * @param array<string,mixed> $profile Profile
+	 * @return array<int,array<string,mixed>>
 	 */
+	private function parsePlainTextLines(string $text, array $profile): array
+	{
+		$id = (string) ($profile['id'] ?? '');
+		$flat = preg_replace('/\s+/u', ' ', str_replace("\xC2\xA0", ' ', $text));
+		$flat = is_string($flat) ? trim($flat) : trim($text);
+
+		if ($id === 'dsc') {
+			// DSC order rows are: product-code, net unit, VAT, gross unit,
+			// quantity+unit, net total, gross total. The totals anchor the pattern
+			// so summary rows cannot be mistaken for products.
+			$pattern = '/\b([A-Z0-9][A-Z0-9._\/-]{4,})\s+([0-9][0-9\s.,]*)\s*Ft\s+([0-9]+(?:[.,][0-9]+)?)\s*%\s+([0-9][0-9\s.,]*)\s*Ft\s+([0-9]+(?:[.,][0-9]+)?)\s*([^0-9\s]+)\s+([0-9][0-9\s.,]*)\s*Ft\s+([0-9][0-9\s.,]*)\s*Ft\b/u';
+			$matches = array();
+			if (preg_match_all($pattern, $flat, $matches, PREG_SET_ORDER)) {
+				$lines = array();
+				foreach ($matches as $match) {
+					$ref = trim((string) ($match[1] ?? ''));
+					$price = $this->parseMoney((string) ($match[2] ?? ''), 'comma_thousands');
+					$vat = (float) str_replace(',', '.', (string) ($match[3] ?? '0'));
+					$qty = $this->parseQuantity((string) ($match[5] ?? ''));
+					$unit = trim((string) ($match[6] ?? ''));
+					if ($ref !== '' && $price >= 0 && $qty > 0) {
+						$lines[] = array(
+							'supplier_product_ref' => $ref,
+							'manufacturer_ref' => '',
+							'label' => $ref,
+							'qty' => $qty,
+							'unit' => $unit,
+							'unit_price' => $price,
+							'vat_rate' => $vat,
+						);
+					}
+				}
+				return $lines;
+			}
+		}
+
+		return array();
+	}
+
+	/**
+	 * Build one normalized line from profile-mapped cells.
+	 *
+	 * @param string $productText Product cell
+	 * @param string $qtyText Quantity cell
+	 * @param string $unitText Unit cell
+	 * @param string $priceText Unit-price cell
+	 * @param string $vatText VAT cell
+	 * @param array<string,mixed> $profile Profile
+	 * @return array<string,mixed>|null
+	 */
+	private function buildLine(string $productText, string $qtyText, string $unitText, string $priceText, string $vatText, array $profile): ?array
+	{
+		$qty = $this->parseQuantity($qtyText);
+		if ($qty <= 0 || $productText === '') {
+			return null;
+		}
+
+		$supplierProductRef = '';
+		if (!empty($profile['product_ref_is_product_cell'])) {
+			$supplierProductRef = trim($productText);
+		} elseif (!empty($profile['product_ref_regex'])) {
+			$supplierProductRef = $this->extractFirst($productText, array((string) $profile['product_ref_regex']));
+		}
+
+		$manufacturerRef = '';
+		if (!empty($profile['manufacturer_ref_regex'])) {
+			$manufacturerRef = $this->extractFirst($productText, array((string) $profile['manufacturer_ref_regex']));
+			if (strtoupper($manufacturerRef) === 'N/A') {
+				$manufacturerRef = '';
+			}
+		}
+
+		$priceSource = (($profile['unit_price_source'] ?? '') === 'product') ? $productText : $priceText;
+		$unitPrice = $this->extractUnitPrice($priceSource, $profile);
+		if ($unitPrice < 0) {
+			return null;
+		}
+
+		$vatRate = isset($profile['default_vat']) ? (float) $profile['default_vat'] : 0.0;
+		if ($vatText !== '') {
+			$parsedVat = $this->extractPercent($vatText);
+			if ($parsedVat !== null) {
+				$vatRate = $parsedVat;
+			}
+		} elseif (($profile['vat_source'] ?? '') === 'unit_price') {
+			$parsedVat = $this->extractPercent($priceSource);
+			if ($parsedVat !== null) {
+				$vatRate = $parsedVat;
+			}
+		}
+
+		return array(
+			'supplier_product_ref' => $supplierProductRef,
+			'manufacturer_ref' => $manufacturerRef,
+			'label' => $this->cleanupLabel($productText, (array) ($profile['label_strip_patterns'] ?? array())),
+			'qty' => $qty,
+			'unit' => $unitText !== '' ? $this->cleanupUnit($unitText) : $this->extractUnitFromQuantity($qtyText),
+			'unit_price' => $unitPrice,
+			'vat_rate' => $vatRate,
+		);
+	}
+
+	/** @param array<int,array{text:string,html:string}> $cells @param int $index @return string */
 	private function cellText(array $cells, int $index): string
 	{
 		return $index >= 0 && isset($cells[$index]) ? trim((string) ($cells[$index]['text'] ?? '')) : '';
 	}
 
-	/**
-	 * @param string $text Source
-	 * @param array<string,mixed> $profile Profile
-	 * @return float
-	 */
+	/** @param string $text @param array<string,mixed> $profile @return float */
 	private function extractUnitPrice(string $text, array $profile): float
 	{
 		if ($text === '') {
 			return -1.0;
 		}
-
 		if (!empty($profile['unit_price_regex'])) {
 			$value = $this->extractFirst($text, array((string) $profile['unit_price_regex']));
 			return $value !== '' ? $this->parseMoney($value, (string) ($profile['number_format'] ?? 'auto')) : -1.0;
 		}
-
 		$amounts = array();
 		if (preg_match_all('/(-?[0-9][0-9\s.,]*)\s*(?:Ft|HUF)\b/iu', $text, $matches)) {
 			foreach ((array) ($matches[1] ?? array()) as $amount) {
@@ -262,11 +321,7 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 		return isset($amounts[$pick]) ? (float) $amounts[$pick] : -1.0;
 	}
 
-	/**
-	 * @param string $text Text
-	 * @param string[] $patterns Regexes without delimiters
-	 * @return string
-	 */
+	/** @param string $text @param string[] $patterns @return string */
 	private function extractFirst(string $text, array $patterns): string
 	{
 		foreach ($patterns as $pattern) {
@@ -278,11 +333,7 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 		return '';
 	}
 
-	/**
-	 * @param string $text Text
-	 * @param string[] $patterns Regexes
-	 * @return int|null Unix timestamp
-	 */
+	/** @param string $text @param string[] $patterns @return int|null */
 	private function extractDate(string $text, array $patterns): ?int
 	{
 		$value = $this->extractFirst($text, $patterns);
@@ -295,11 +346,7 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 		return $timestamp !== false ? $timestamp : null;
 	}
 
-	/**
-	 * @param array<string,mixed> $message Message
-	 * @param array<string,mixed> $profile Profile
-	 * @return string
-	 */
+	/** @param array<string,mixed> $message @param array<string,mixed> $profile @return string */
 	private function resolveSupplierSender(array $message, array $profile): string
 	{
 		$text = (string) ($message['from'] ?? '')."\n".(string) ($message['body'] ?? '')."\n".(string) ($message['header'] ?? '');
@@ -312,10 +359,7 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 		return strtolower((string) ($profile['canonical_sender'] ?? ''));
 	}
 
-	/**
-	 * @param string $value Quantity text
-	 * @return float
-	 */
+	/** @param string $value @return float */
 	private function parseQuantity(string $value): float
 	{
 		if (preg_match('/-?[0-9]+(?:[.,][0-9]+)?/u', str_replace("\xC2\xA0", ' ', $value), $matches)) {
@@ -324,11 +368,7 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 		return 0.0;
 	}
 
-	/**
-	 * @param string $value Money text
-	 * @param string $format Number convention
-	 * @return float
-	 */
+	/** @param string $value @param string $format @return float */
 	private function parseMoney(string $value, string $format): float
 	{
 		$value = trim(str_replace(array("\xC2\xA0", ' '), '', $value));
@@ -336,24 +376,16 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 		if (!is_string($value) || $value === '') {
 			return -1.0;
 		}
-
-		if ($format === 'comma_thousands') {
-			return (float) str_replace(',', '', $value);
-		}
-		if ($format === 'us') {
+		if ($format === 'comma_thousands' || $format === 'us') {
 			return (float) str_replace(',', '', $value);
 		}
 		if ($format === 'decimal_comma') {
 			return (float) str_replace(',', '.', str_replace('.', '', $value));
 		}
-
 		$lastComma = strrpos($value, ',');
 		$lastDot = strrpos($value, '.');
 		if ($lastComma !== false && $lastDot !== false) {
-			if ($lastDot > $lastComma) {
-				return (float) str_replace(',', '', $value);
-			}
-			return (float) str_replace(',', '.', str_replace('.', '', $value));
+			return $lastDot > $lastComma ? (float) str_replace(',', '', $value) : (float) str_replace(',', '.', str_replace('.', '', $value));
 		}
 		if ($lastComma !== false) {
 			$decimals = strlen($value) - $lastComma - 1;
@@ -362,10 +394,7 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 		return (float) $value;
 	}
 
-	/**
-	 * @param string $text Text
-	 * @return float|null
-	 */
+	/** @param string $text @return float|null */
 	private function extractPercent(string $text): ?float
 	{
 		if (preg_match('/(-?[0-9]+(?:[.,][0-9]+)?)\s*%/u', $text, $matches)) {
@@ -374,11 +403,7 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 		return null;
 	}
 
-	/**
-	 * @param string $label Product cell text
-	 * @param string[] $patterns Strip regexes
-	 * @return string
-	 */
+	/** @param string $label @param string[] $patterns @return string */
 	private function cleanupLabel(string $label, array $patterns): string
 	{
 		foreach ($patterns as $pattern) {
@@ -390,21 +415,14 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 		return $this->extractor->normalizeText($label);
 	}
 
-	/**
-	 * @param string $value Unit cell
-	 * @return string
-	 */
+	/** @param string $value @return string */
 	private function cleanupUnit(string $value): string
 	{
 		$value = preg_replace('/^[0-9\s.,]+/u', '', trim($value));
-		$value = is_string($value) ? trim($value, " .\t\n\r\0\x0B") : '';
-		return $value;
+		return is_string($value) ? trim($value, " .\t\n\r\0\x0B") : '';
 	}
 
-	/**
-	 * @param string $value Quantity cell
-	 * @return string
-	 */
+	/** @param string $value @return string */
 	private function extractUnitFromQuantity(string $value): string
 	{
 		if (preg_match('/[0-9]+(?:[.,][0-9]+)?\s*([^0-9\s]+(?:\s+[^0-9\s]+)*)/u', $value, $matches)) {
@@ -413,13 +431,7 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 		return '';
 	}
 
-	/**
-	 * Supplier profiles for the currently known recurring vendors.
-	 *
-	 * Regex strings intentionally omit delimiters; the parser adds /.../iu.
-	 *
-	 * @return array<int,array<string,mixed>>
-	 */
+	/** @return array<int,array<string,mixed>> */
 	private function getProfiles(): array
 	{
 		return array(
@@ -485,9 +497,7 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 		);
 	}
 
-	/**
-	 * @return array<string,mixed>
-	 */
+	/** @return array<string,mixed> */
 	private function emptyResult(): array
 	{
 		return array(
