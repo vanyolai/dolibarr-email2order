@@ -7,7 +7,7 @@ dol_include_once('/email2order/class/extractor/htmlorderextractor.class.php');
  * Profile-driven parser for structured supplier order confirmations.
  *
  * HTML table handling is shared. Supplier differences are declarative where
- * possible. A conservative profile-specific plain-text fallback is available
+ * possible. Conservative profile-specific plain-text fallbacks are available
  * for forwarded messages where the mail client flattens the original HTML.
  */
 class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
@@ -55,7 +55,7 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 		$combinedText = $subject."\n".$text;
 
 		// Prefer the original decoded HTML MIME part if Dolibarr Email Collector
-		// kept it in its global while passing only plain messagetext to the hook.
+		// happens to expose it globally while passing only plain messagetext to the hook.
 		$htmlBody = $body;
 		if (isset($GLOBALS['htmlmsg']) && is_string($GLOBALS['htmlmsg']) && trim($GLOBALS['htmlmsg']) !== '') {
 			$htmlBody = $GLOBALS['htmlmsg'];
@@ -222,6 +222,36 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 							'unit' => $unit,
 							'unit_price' => $price,
 							'vat_rate' => $vat,
+						);
+					}
+				}
+				return $lines;
+			}
+		}
+
+		if ($id === 'powerbizt') {
+			// POWER flattened rows retain stable semantic anchors:
+			//   <label> Termékkód: <ref> Egységár: <net> Ft <line total> Ft <qty> Raktáron
+			// The first row is preceded by the Készlet column heading, later rows by
+			// the previous row's Raktáron status. This prevents matching the summary.
+			$pattern = '/(?:K[eé]szlet|Rakt[aá]ron)\s+(.+?)\s+Term[eé]kk[oó]d\s*:\s*([A-Z0-9._\/-]+)\s+Egys[eé]g[aá]r\s*:\s*([0-9][0-9\s.,]*)\s*Ft\s+([0-9][0-9\s.,]*)\s*Ft\s+([0-9]+(?:[.,][0-9]+)?)\s+(?=Rakt[aá]ron\b)/iu';
+			$matches = array();
+			if (preg_match_all($pattern, $flat, $matches, PREG_SET_ORDER)) {
+				$lines = array();
+				foreach ($matches as $match) {
+					$label = trim((string) ($match[1] ?? ''));
+					$ref = trim((string) ($match[2] ?? ''));
+					$price = $this->parseMoney((string) ($match[3] ?? ''), 'auto');
+					$qty = $this->parseQuantity((string) ($match[5] ?? ''));
+					if ($ref !== '' && $price >= 0 && $qty > 0) {
+						$lines[] = array(
+							'supplier_product_ref' => $ref,
+							'manufacturer_ref' => '',
+							'label' => $this->extractor->normalizeText($label),
+							'qty' => $qty,
+							'unit' => 'db',
+							'unit_price' => $price,
+							'vat_rate' => 27.0,
 						);
 					}
 				}
@@ -482,7 +512,10 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 				'domains' => array('powerbizt.hu'),
 				'canonical_sender' => 'uzlet@powerbizt.hu',
 				'subject_hints' => array('rendelés visszaigazolás', 'rendeles visszaigazolas'),
-				'supplier_reference_regexes' => array('Foglal[aá]si sz[aá]mok\s*:\s*([A-Z]{1,5}-[0-9]+)'),
+				'supplier_reference_regexes' => array(
+					'Foglal[aá]si sz[aá]mok\s*:\s*([A-Z]{1,5}-[0-9]+)',
+					'\b(BI-[0-9]+)\b',
+				),
 				'order_date_regexes' => array(),
 				'table_header_patterns' => array('Term[eé]k', '[ÁA]r.*[oö]ssz', 'Db\.?', 'K[eé]szlet'),
 				'columns' => array('product' => '^Term[eé]k$', 'qty' => 'Db\.?'),
