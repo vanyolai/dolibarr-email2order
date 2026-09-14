@@ -2,11 +2,14 @@
 /* Copyright (C) 2026 dolibarr-email2order contributors */
 
 /**
- * Conservative fallback parser. It extracts only fields that can be
- * identified without supplier-specific table knowledge.
+ * Conservative fallback parser. Supplier-specific parsers are tried before
+ * the generic extraction rules.
  */
 class GenericEmail2OrderParser implements Email2OrderParserInterface
 {
+	/** @var string Effective parser identifier */
+	private $activeParserName = 'generic';
+
 	/** @inheritdoc */
 	public function supports(array $message): bool
 	{
@@ -16,12 +19,24 @@ class GenericEmail2OrderParser implements Email2OrderParserInterface
 	/** @inheritdoc */
 	public function getName(): string
 	{
-		return 'generic';
+		return $this->activeParserName;
 	}
 
 	/** @inheritdoc */
 	public function parse(array $message): array
 	{
+		// Keep the action hook simple for now: supplier-specific parsers are
+		// delegated from this fallback parser until a dedicated registry exists.
+		dol_include_once('/email2order/class/parser/emileemail2orderparser.class.php');
+		if (class_exists('EmileEmail2OrderParser')) {
+			$emileParser = new EmileEmail2OrderParser();
+			if ($emileParser->supports($message)) {
+				$this->activeParserName = $emileParser->getName();
+				return $emileParser->parse($message);
+			}
+		}
+
+		$this->activeParserName = 'generic';
 		$subject = (string) ($message['subject'] ?? '');
 		$body = (string) ($message['body'] ?? '');
 		$header = (string) ($message['header'] ?? '');
@@ -52,7 +67,6 @@ class GenericEmail2OrderParser implements Email2OrderParserInterface
 				if (preg_match('/\d/', $candidate)) {
 					return $candidate;
 				}
-			}
 		}
 
 		return '';
