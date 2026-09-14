@@ -13,7 +13,7 @@ class HtmlOrderExtractor
 	/**
 	 * Convert HTML to readable normalized text.
 	 *
-	 * @param string $html HTML body
+	 * @param string $html HTML body or Email Collector plain body
 	 * @return string
 	 */
 	public function toText(string $html): string
@@ -31,20 +31,45 @@ class HtmlOrderExtractor
 	}
 
 	/**
-	 * Extract every HTML table into direct rows/cells.
-	 * Nested tables are returned independently because XPath selects each table
-	 * node and row extraction is restricted to direct children.
+	 * Extract every HTML table into rows/cells.
 	 *
-	 * @param string $html HTML body
+	 * Dolibarr Email Collector intentionally passes a plain-text `messagetext`
+	 * to action hooks even when an HTML MIME part exists. During collection the
+	 * decoded HTML part is still available in the global $htmlmsg used by the
+	 * core collector. Prefer it transparently when the hook body itself does not
+	 * contain HTML.
+	 *
+	 * DOMDocument is used when available. A small regex based fallback keeps the
+	 * extractor functional on PHP installations without ext-dom.
+	 *
+	 * @param string $html HTML body or Email Collector plain body
 	 * @return array<int,array{rows:array<int,array{cells:array<int,array{text:string,html:string}>,has_th:bool}>}>
 	 */
 	public function extractTables(string $html): array
 	{
-		$document = $this->loadDocument($html);
-		if ($document === null) {
+		global $htmlmsg;
+
+		if (!$this->looksLikeHtmlWithTables($html) && isset($htmlmsg) && is_string($htmlmsg) && $this->looksLikeHtmlWithTables($htmlmsg)) {
+			$html = $htmlmsg;
+		}
+		if (!$this->looksLikeHtmlWithTables($html)) {
 			return array();
 		}
 
+		$document = $this->loadDocument($html);
+		if ($document !== null) {
+			return $this->extractTablesWithDom($document);
+		}
+
+		return $this->extractTablesWithoutDom($html);
+	}
+
+	/**
+	 * @param DOMDocument $document Parsed document
+	 * @return array<int,array{rows:array<int,array{cells:array<int,array{text:string,html:string}>,has_th:bool}>}>
+	 */
+	private function extractTablesWithDom(DOMDocument $document): array
+	{
 		$xpath = new DOMXPath($document);
 		$tableNodes = $xpath->query('//table');
 		if ($tableNodes === false) {
@@ -102,6 +127,60 @@ class HtmlOrderExtractor
 	}
 
 	/**
+	 * Extension-free HTML table fallback.
+	 *
+	 * This is intentionally conservative: it only recognizes explicit table,
+	 * tr, td and th markup. Supplier-specific interpretation remains in profiles.
+	 *
+	 * @param string $html HTML body
+	 * @return array<int,array{rows:array<int,array{cells:array<int,array{text:string,html:string}>,has_th:bool}>}>
+	 */
+	private function extractTablesWithoutDom(string $html): array
+	{
+		$tables = array();
+		$tableMatches = array();
+		if (preg_match_all('/<table\b[^>]*>(.*?)<\/table\s*>/isu', $html, $tableMatches) !== false) {
+			foreach ((array) ($tableMatches[1] ?? array()) as $tableHtml) {
+				$rowMatches = array();
+				if (preg_match_all('/<tr\b[^>]*>(.*?)<\/tr\s*>/isu', (string) $tableHtml, $rowMatches) === false) {
+					continue;
+				}
+
+				$rows = array();
+				foreach ((array) ($rowMatches[1] ?? array()) as $rowHtml) {
+					$cellMatches = array();
+					if (preg_match_all('/<(td|th)\b[^>]*>(.*?)<\/\1\s*>/isu', (string) $rowHtml, $cellMatches, PREG_SET_ORDER) === false) {
+						continue;
+					}
+
+					$cells = array();
+					$hasTh = false;
+					foreach ($cellMatches as $cellMatch) {
+						$tag = strtolower((string) ($cellMatch[1] ?? ''));
+						$cellHtml = (string) ($cellMatch[2] ?? '');
+						if ($tag === 'th') {
+							$hasTh = true;
+						}
+						$cells[] = array(
+							'text' => $this->htmlFragmentToText($cellHtml),
+							'html' => $cellHtml,
+						);
+					}
+					if (!empty($cells)) {
+						$rows[] = array('cells' => $cells, 'has_th' => $hasTh);
+					}
+				}
+
+				if (!empty($rows)) {
+					$tables[] = array('rows' => $rows);
+				}
+			}
+		}
+
+		return $tables;
+	}
+
+	/**
 	 * Find a table/header row containing all supplied regular expressions.
 	 *
 	 * @param array<int,array{rows:array<int,array{cells:array<int,array{text:string,html:string}>,has_th:bool}>}> $tables Tables
@@ -127,7 +206,6 @@ class HtmlOrderExtractor
 					return array('table' => $table, 'header_index' => (int) $rowIndex);
 				}
 			}
-		}
 
 		return null;
 	}
@@ -174,6 +252,28 @@ class HtmlOrderExtractor
 
 		$normalized = preg_replace('/\s+/u', ' ', trim($text));
 		return is_string($normalized) ? $normalized : trim($text);
+	}
+
+	/**
+	 * @param string $html HTML
+	 * @return bool
+	 */
+	private function looksLikeHtmlWithTables(string $html): bool
+	{
+		return $html !== '' && preg_match('/<table\b/i', $html) === 1;
+	}
+
+	/**
+	 * @param string $html HTML fragment
+	 * @return string
+	 */
+	private function htmlFragmentToText(string $html): string
+	{
+		$prepared = preg_replace('/<(?:br|\/p|\/div|\/li)\b[^>]*>/iu', "$0\n", $html);
+		if (!is_string($prepared)) {
+			$prepared = $html;
+		}
+		return $this->normalizeText(html_entity_decode(strip_tags($prepared), ENT_QUOTES | ENT_HTML5, 'UTF-8'));
 	}
 
 	/**
