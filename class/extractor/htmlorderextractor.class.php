@@ -206,6 +206,7 @@ class HtmlOrderExtractor
 					return array('table' => $table, 'header_index' => (int) $rowIndex);
 				}
 			}
+		}
 
 		return null;
 	}
