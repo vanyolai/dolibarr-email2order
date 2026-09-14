@@ -67,6 +67,7 @@ class GenericEmail2OrderParser implements Email2OrderParserInterface
 				if (preg_match('/\d/', $candidate)) {
 					return $candidate;
 				}
+			}
 		}
 
 		return '';
