@@ -230,17 +230,29 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 		}
 
 		if ($id === 'delton') {
-			// Delton forwarded confirmations flatten the original five-column table:
+			// Delton forwarded confirmations flatten the original table as:
 			//   Mennyiség | M.e. | Terméknév | Egységár | Összár
-			// Parse only after that exact semantic header and require two Ft/HUF
-			// amounts per row, so order metadata and summary amounts are ignored.
+			// Current Delton pages render line prices as "9 437.-" without an Ft
+			// suffix, while older/alternate output may still use Ft/HUF. Restrict
+			// parsing to the table area before the summary and require two explicit
+			// price terminators so numeric model references stay part of the label.
 			$headerMatch = array();
 			if (preg_match('/mennyis[eé]g\s+.*?term[eé]kn[eé]v\s+egys[eé]g[aá]r\s+[oö]ssz[aá]r/iu', $flat, $headerMatch, PREG_OFFSET_CAPTURE)) {
 				$headerText = (string) ($headerMatch[0][0] ?? '');
 				$headerOffset = (int) ($headerMatch[0][1] ?? -1);
 				if ($headerText !== '' && $headerOffset >= 0) {
 					$tableText = substr($flat, $headerOffset + strlen($headerText));
-					$rowPattern = '/(?:^|\s)([0-9]+(?:[.,][0-9]+)?)\s+(\p{L}+(?:\.)?)\s+(.+?)\s+([0-9][0-9\s.,]*)\s*(?:Ft|HUF)\s+([0-9][0-9\s.,]*)\s*(?:Ft|HUF)(?=\s|$)/iu';
+					$summaryOffset = preg_match('/\b[oö]sszesen\s*:/iu', $tableText, $summaryMatch, PREG_OFFSET_CAPTURE)
+						? (int) ($summaryMatch[0][1] ?? -1)
+						: -1;
+					if ($summaryOffset >= 0) {
+						$tableText = substr($tableText, 0, $summaryOffset);
+					}
+
+					$amountPattern = '((?:[0-9]{1,3}(?:\s[0-9]{3})+|[0-9]+)(?:[.,][0-9]{1,2})?)';
+					$rowPattern = '/(?:^|\s)([0-9]+(?:[.,][0-9]+)?)\s+(\p{L}+(?:\.)?)\s+(.+?)\s+'
+						.$amountPattern.'\s*(?:\.-|Ft|HUF)\s+'
+						.$amountPattern.'\s*(?:\.-|Ft|HUF)(?=\s|$)/iu';
 					$matches = array();
 					if (preg_match_all($rowPattern, $tableText, $matches, PREG_SET_ORDER)) {
 						$lines = array();
