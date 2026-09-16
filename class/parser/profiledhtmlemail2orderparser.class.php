@@ -229,6 +229,48 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 			}
 		}
 
+		if ($id === 'delton') {
+			// Delton forwarded confirmations flatten the original five-column table:
+			//   Mennyiség | M.e. | Terméknév | Egységár | Összár
+			// Parse only after that exact semantic header and require two Ft/HUF
+			// amounts per row, so order metadata and summary amounts are ignored.
+			$headerMatch = array();
+			if (preg_match('/mennyis[eé]g\s+.*?term[eé]kn[eé]v\s+egys[eé]g[aá]r\s+[oö]ssz[aá]r/iu', $flat, $headerMatch, PREG_OFFSET_CAPTURE)) {
+				$headerText = (string) ($headerMatch[0][0] ?? '');
+				$headerOffset = (int) ($headerMatch[0][1] ?? -1);
+				if ($headerText !== '' && $headerOffset >= 0) {
+					$tableText = substr($flat, $headerOffset + strlen($headerText));
+					$rowPattern = '/(?:^|\s)([0-9]+(?:[.,][0-9]+)?)\s+(\p{L}+(?:\.)?)\s+(.+?)\s+([0-9][0-9\s.,]*)\s*(?:Ft|HUF)\s+([0-9][0-9\s.,]*)\s*(?:Ft|HUF)(?=\s|$)/iu';
+					$matches = array();
+					if (preg_match_all($rowPattern, $tableText, $matches, PREG_SET_ORDER)) {
+						$lines = array();
+						foreach ($matches as $match) {
+							$qty = $this->parseQuantity((string) ($match[1] ?? ''));
+							$unit = $this->cleanupUnit((string) ($match[2] ?? ''));
+							$label = $this->extractor->normalizeText((string) ($match[3] ?? ''));
+							$unitPrice = $this->parseMoney((string) ($match[4] ?? ''), (string) ($profile['number_format'] ?? 'auto'));
+							$lineTotal = $this->parseMoney((string) ($match[5] ?? ''), (string) ($profile['number_format'] ?? 'auto'));
+
+							if ($qty <= 0 || $unit === '' || $label === '' || $unitPrice < 0 || $lineTotal < 0) {
+								continue;
+							}
+
+							$lines[] = array(
+								'supplier_product_ref' => '',
+								'manufacturer_ref' => '',
+								'label' => $label,
+								'qty' => $qty,
+								'unit' => $unit,
+								'unit_price' => $unitPrice,
+								'vat_rate' => isset($profile['default_vat']) ? (float) $profile['default_vat'] : 0.0,
+							);
+						}
+						return $lines;
+					}
+				}
+			}
+		}
+
 		if ($id === 'daniella') {
 			// Daniella flattened rows keep a strong product-cell marker:
 			//   <label> Gyártó: ... | Gyártói azonosító: <manufacturer ref>
@@ -260,7 +302,7 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 						continue;
 					}
 					$qty = $this->parseQuantity((string) ($qtyMatch[1] ?? ''));
-					$unit = trim((string) ($qtyMatch[2] ?? ''));
+					$unit = $this->cleanupUnit((string) ($qtyMatch[2] ?? ''));
 					$afterQuantity = substr($rowTail, strlen((string) ($qtyMatch[0] ?? '')));
 
 					$moneyMatches = array();
@@ -315,6 +357,10 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 					}
 
 					$label = $this->extractor->normalizeText(substr($flat, $labelStart, max(0, $productEnd - $labelStart)));
+					$cleanLabel = preg_replace('/^\s*(?:[ÁA]r\s*)?\(\s*brutt[oó]\s*\/\s*nett[oó]\s*\)\s*/iu', '', $label);
+					if (is_string($cleanLabel)) {
+						$label = $this->extractor->normalizeText($cleanLabel);
+					}
 					if ($qty > 0 && $netPrice >= 0 && $label !== '') {
 						$lines[] = array(
 							'supplier_product_ref' => '',
