@@ -43,6 +43,9 @@ class GenericEmail2OrderParser implements Email2OrderParserInterface
 			if ($parser->supports($message)) {
 				$result = $parser->parse($message);
 				$this->activeParserName = $parser->getName();
+				if ($this->activeParserName === 'html-profile:powerbizt') {
+					$result = $this->correctPowerUnitPrices($result, $message);
+				}
 				return $result;
 			}
 		}
@@ -63,6 +66,74 @@ class GenericEmail2OrderParser implements Email2OrderParserInterface
 	}
 
 	/**
+	 * POWER displays rounded whole-HUF unit prices, while its line total is the
+	 * authoritative net amount. Reconstruct the effective net unit price from
+	 * line total / quantity so the imported supplier-order total stays exact.
+	 *
+	 * @param array<string,mixed> $result Parsed normalized order
+	 * @param array<string,mixed> $message Normalized email
+	 * @return array<string,mixed>
+	 */
+	private function correctPowerUnitPrices(array $result, array $message): array
+	{
+		$body = str_replace("\xC2\xA0", ' ', (string) ($message['body'] ?? ''));
+		$flat = preg_replace('/\s+/u', ' ', $body);
+		if (!is_string($flat) || $flat === '') {
+			return $result;
+		}
+
+		$pattern = '/(?:K[eé]szlet|Rakt[aá]ron)\s+(.+?)\s+Term[eé]kk[oó]d\s*:\s*([A-Z0-9._\/-]+)\s+Egys[eé]g[aá]r\s*:\s*([0-9][0-9\s.,]*)\s*Ft\s+([0-9][0-9\s.,]*)\s*Ft\s+([0-9]+(?:[.,][0-9]+)?)\s+(?=Rakt[aá]ron\b)/iu';
+		$matches = array();
+		if (!preg_match_all($pattern, $flat, $matches, PREG_SET_ORDER)) {
+			return $result;
+		}
+
+		$effectivePrices = array();
+		foreach ($matches as $match) {
+			$ref = trim((string) ($match[2] ?? ''));
+			$lineTotal = $this->parsePowerMoney((string) ($match[4] ?? ''));
+			$qty = $this->parsePowerQuantity((string) ($match[5] ?? ''));
+			if ($ref !== '' && $lineTotal >= 0 && $qty > 0) {
+				$effectivePrices[strtolower($ref)] = round($lineTotal / $qty, 6);
+			}
+		}
+
+		$lines = (array) ($result['lines'] ?? array());
+		foreach ($lines as $index => $line) {
+			$ref = strtolower(trim((string) ($line['supplier_product_ref'] ?? '')));
+			if ($ref !== '' && isset($effectivePrices[$ref])) {
+				$lines[$index]['unit_price'] = $effectivePrices[$ref];
+			}
+		}
+		$result['lines'] = $lines;
+
+		return $result;
+	}
+
+	/** @param string $value @return float */
+	private function parsePowerMoney(string $value): float
+	{
+		$value = preg_replace('/[^0-9,\.\-]/u', '', str_replace(array("\xC2\xA0", ' '), '', $value));
+		if (!is_string($value) || $value === '') {
+			return -1.0;
+		}
+		if (strpos($value, ',') !== false && strpos($value, '.') === false) {
+			$decimals = strlen($value) - strrpos($value, ',') - 1;
+			return $decimals === 3 ? (float) str_replace(',', '', $value) : (float) str_replace(',', '.', $value);
+		}
+		return (float) str_replace(',', '', $value);
+	}
+
+	/** @param string $value @return float */
+	private function parsePowerQuantity(string $value): float
+	{
+		if (preg_match('/-?[0-9]+(?:[.,][0-9]+)?/u', $value, $matches)) {
+			return (float) str_replace(',', '.', (string) $matches[0]);
+		}
+		return 0.0;
+	}
+
+	/**
 	 * @param string $text Message text
 	 * @return string
 	 */
@@ -78,7 +149,6 @@ class GenericEmail2OrderParser implements Email2OrderParserInterface
 				if (preg_match('/\d/', $candidate)) {
 					return $candidate;
 				}
-			}
 		}
 
 		return '';
