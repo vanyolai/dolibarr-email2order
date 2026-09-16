@@ -394,9 +394,10 @@ class ActionsEmail2Order extends CommonHookActions
 	}
 
 	/**
-	 * Resolve a structured supplier message by email domain when the exact
-	 * technical sender address is not stored in Dolibarr. A domain is accepted
-	 * only if exactly one supplier company/contact uses it.
+	 * Resolve a structured supplier message by sender domain when the exact
+	 * technical sender address is not stored in Dolibarr. The domain may match
+	 * either a supplier/company or supplier/contact email domain, or the supplier
+	 * website host. It is accepted only when the combined match is unique.
 	 *
 	 * Public mailbox providers are explicitly excluded because a unique match in
 	 * today's data would not make such a domain a reliable supplier identity.
@@ -445,13 +446,31 @@ class ActionsEmail2Order extends CommonHookActions
 
 		$suffix = '%@'.$domain;
 		$escapedSuffix = $this->db->escape($suffix);
+		$urlCandidates = array(
+			$domain,
+			'www.'.$domain,
+			'http://'.$domain,
+			'https://'.$domain,
+			'http://www.'.$domain,
+			'https://www.'.$domain,
+		);
+		$urlClauses = array();
+		foreach ($urlCandidates as $candidate) {
+			$escapedCandidate = $this->db->escape($candidate);
+			$urlClauses[] = "LOWER(TRIM(s.url)) = '".$escapedCandidate."'";
+			$urlClauses[] = "LOWER(TRIM(s.url)) LIKE '".$escapedCandidate."/%'";
+		}
 
 		$sql = 'SELECT DISTINCT s.rowid';
 		$sql .= ' FROM '.MAIN_DB_PREFIX.'societe AS s';
 		$sql .= ' LEFT JOIN '.MAIN_DB_PREFIX.'socpeople AS sp ON sp.fk_soc = s.rowid';
 		$sql .= ' WHERE s.entity = '.((int) $conf->entity);
 		$sql .= ' AND s.fournisseur > 0';
-		$sql .= " AND (LOWER(s.email) LIKE '".$escapedSuffix."' OR LOWER(sp.email) LIKE '".$escapedSuffix."')";
+		$sql .= " AND (LOWER(s.email) LIKE '".$escapedSuffix."' OR LOWER(sp.email) LIKE '".$escapedSuffix."'";
+		if (!empty($urlClauses)) {
+			$sql .= ' OR '.implode(' OR ', $urlClauses);
+		}
+		$sql .= ')';
 
 		$resql = $this->db->query($sql);
 		if (!$resql) {
@@ -470,7 +489,7 @@ class ActionsEmail2Order extends CommonHookActions
 		$obj = $this->db->fetch_object($resql);
 		$supplierId = $obj ? (int) $obj->rowid : 0;
 		if ($supplierId > 0) {
-			dol_syslog('Email2Order: resolved supplier id='.$supplierId.' by unique email domain '.$domain, LOG_INFO);
+			dol_syslog('Email2Order: resolved supplier id='.$supplierId.' by unique sender/website domain '.$domain, LOG_INFO);
 		}
 		return $supplierId;
 	}
