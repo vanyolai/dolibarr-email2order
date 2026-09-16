@@ -6,3 +6,4 @@ Email2OrderAlreadyImported=Ez az e-mail már importálva lett a(z) %s azonosít�
 Email2OrderImportTableError=Az Email2Order nem tudta olvasni vagy frissíteni az import-nyilvántartást.
 Email2OrderCreateFailed=Az Email2Order nem tudta létrehozni a draft beszállítói rendelést.
 Email2OrderCreated=Az Email2Order létrehozta a(z) %s draft beszállítói rendelést.
+Email2OrderMinimumOrderInvalid=A feldolgozott e-mail nem teljesíti a minimálisan érvényes rendelés feltételeit. Draft beszállítói rendelés nem jött létre.
