@@ -6,3 +6,4 @@ Email2OrderAlreadyImported=This email was already imported as supplier order ID 
 Email2OrderImportTableError=Email2Order could not read or update its import registry.
 Email2OrderCreateFailed=Email2Order could not create the draft supplier order.
 Email2OrderCreated=Email2Order created draft supplier order %s.
+Email2OrderMinimumOrderInvalid=The parsed email does not meet the minimum valid-order requirements. No draft supplier order was created.
