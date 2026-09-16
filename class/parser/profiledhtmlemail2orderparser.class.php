@@ -229,6 +229,108 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 			}
 		}
 
+		if ($id === 'daniella') {
+			// Daniella flattened rows keep a strong product-cell marker:
+			//   <label> Gyártó: ... | Gyártói azonosító: <manufacturer ref>
+			// followed by quantity+unit, gross unit price, net unit price, VAT and
+			// the line value. Keep the manufacturer reference distinct from the
+			// supplier-product reference, matching the structured HTML parser.
+			$markerPattern = '/Gy[aá]rt[oó]i azonos[ií]t[oó]\s*:\s*([A-Z0-9._\/-]+)/iu';
+			$markerRows = array();
+			if (preg_match_all($markerPattern, $flat, $markerRows, PREG_SET_ORDER | PREG_OFFSET_CAPTURE)) {
+				$lines = array();
+				$markerCount = count($markerRows);
+				for ($index = 0; $index < $markerCount; $index++) {
+					$marker = $markerRows[$index];
+					$fullMarker = (string) ($marker[0][0] ?? '');
+					$markerOffset = (int) ($marker[0][1] ?? -1);
+					$manufacturerRef = trim((string) ($marker[1][0] ?? ''));
+					if ($fullMarker === '' || $markerOffset < 0 || $manufacturerRef === '') {
+						continue;
+					}
+
+					$markerEnd = $markerOffset + strlen($fullMarker);
+					$nextMarkerOffset = $index + 1 < $markerCount
+						? (int) ($markerRows[$index + 1][0][1] ?? strlen($flat))
+						: strlen($flat);
+					$rowTail = substr($flat, $markerEnd, max(0, $nextMarkerOffset - $markerEnd));
+
+					$qtyMatch = array();
+					if (!preg_match('/^\s+([0-9]+(?:[.,][0-9]+)?)\s+(\p{L}+(?:\.)?)/u', $rowTail, $qtyMatch)) {
+						continue;
+					}
+					$qty = $this->parseQuantity((string) ($qtyMatch[1] ?? ''));
+					$unit = trim((string) ($qtyMatch[2] ?? ''));
+					$afterQuantity = substr($rowTail, strlen((string) ($qtyMatch[0] ?? '')));
+
+					$moneyMatches = array();
+					if (!preg_match_all('/([0-9][0-9\s.,]*)\s*(?:Ft|HUF)\b/iu', $afterQuantity, $moneyMatches) || count((array) ($moneyMatches[1] ?? array())) < 2) {
+						continue;
+					}
+					$netPrice = $this->parseMoney((string) $moneyMatches[1][1], 'us');
+
+					$vatMatch = array();
+					if (!preg_match('/([0-9]+(?:[.,][0-9]+)?)\s*%/u', $afterQuantity, $vatMatch)) {
+						continue;
+					}
+					$vat = (float) str_replace(',', '.', (string) ($vatMatch[1] ?? '0'));
+
+					// Locate the product label immediately before the current Gyártó:
+					// marker. The previous line value or the Érték column header gives a
+					// deterministic left boundary in the flattened table.
+					$beforeMarker = substr($flat, 0, $markerOffset);
+					$manufacturerMatches = array();
+					if (!preg_match_all('/Gy[aá]rt[oó]\s*:\s*/iu', $beforeMarker, $manufacturerMatches, PREG_OFFSET_CAPTURE)) {
+						continue;
+					}
+					$manufacturerTokens = (array) ($manufacturerMatches[0] ?? array());
+					$lastManufacturerToken = end($manufacturerTokens);
+					if (!is_array($lastManufacturerToken)) {
+						continue;
+					}
+					$productEnd = (int) ($lastManufacturerToken[1] ?? 0);
+					$beforeProduct = substr($flat, 0, $productEnd);
+					$labelStart = 0;
+					$boundaryEnds = array();
+
+					$valueMatches = array();
+					if (preg_match_all('/[0-9][0-9\s.,]*\s*(?:Ft|HUF)\b/iu', $beforeProduct, $valueMatches, PREG_OFFSET_CAPTURE)) {
+						$valueTokens = (array) ($valueMatches[0] ?? array());
+						$lastValueToken = end($valueTokens);
+						if (is_array($lastValueToken)) {
+							$boundaryEnds[] = (int) ($lastValueToken[1] ?? 0) + strlen((string) ($lastValueToken[0] ?? ''));
+						}
+					}
+
+					$headerMatches = array();
+					if (preg_match_all('/[ÉE]rt[eé]k\b/iu', $beforeProduct, $headerMatches, PREG_OFFSET_CAPTURE)) {
+						$headerTokens = (array) ($headerMatches[0] ?? array());
+						$lastHeaderToken = end($headerTokens);
+						if (is_array($lastHeaderToken)) {
+							$boundaryEnds[] = (int) ($lastHeaderToken[1] ?? 0) + strlen((string) ($lastHeaderToken[0] ?? ''));
+						}
+					}
+					if (!empty($boundaryEnds)) {
+						$labelStart = max($boundaryEnds);
+					}
+
+					$label = $this->extractor->normalizeText(substr($flat, $labelStart, max(0, $productEnd - $labelStart)));
+					if ($qty > 0 && $netPrice >= 0 && $label !== '') {
+						$lines[] = array(
+							'supplier_product_ref' => '',
+							'manufacturer_ref' => $manufacturerRef,
+							'label' => $label,
+							'qty' => $qty,
+							'unit' => $unit,
+							'unit_price' => $netPrice,
+							'vat_rate' => $vat,
+						);
+					}
+				}
+				return $lines;
+			}
+		}
+
 		if ($id === 'powerbizt') {
 			// POWER flattened rows retain stable semantic anchors:
 			//   <label> Termékkód: <ref> Egységár: <net> Ft <line total> Ft <qty> Raktáron
