@@ -139,6 +139,12 @@ class ActionsEmail2Order extends CommonHookActions
 			return $this->fail($langs->trans('Email2OrderImportTableError').' '.$this->db->lasterror());
 		}
 
+		$minimumOrderErrors = $this->getMinimumOrderValidationErrors($supplierId, $parsed);
+		if (!empty($minimumOrderErrors)) {
+			dol_syslog('Email2Order: minimum-valid-order gate rejected parser='.$parser->getName().' reasons='.implode(',', $minimumOrderErrors), LOG_WARNING);
+			return $this->fail($langs->trans('Email2OrderMinimumOrderInvalid'));
+		}
+
 		$emailDate = $this->extractEmailTimestamp($message['overview']);
 		$order = new CommandeFournisseur($this->db);
 		$order->socid = $supplierId;
@@ -234,6 +240,7 @@ class ActionsEmail2Order extends CommonHookActions
 		$lines = (array) ($parsed['lines'] ?? array());
 		$currency = trim((string) ($parsed['currency'] ?? ''));
 		$supplierReference = trim((string) ($parsed['supplier_reference'] ?? ''));
+		$minimumOrderErrors = $this->getMinimumOrderValidationErrors($supplierId, $parsed);
 
 		$debug = '<br><strong>Email2Order diagnostic</strong>';
 		$debug .= '<br>Parser: '.dol_escape_htmltag($parser->getName());
@@ -244,6 +251,7 @@ class ActionsEmail2Order extends CommonHookActions
 		$debug .= '<br>Currency: '.dol_escape_htmltag($currency !== '' ? $currency : '(not parsed)');
 		$debug .= '<br>Attachments: '.dol_escape_htmltag(!empty($attachmentNames) ? implode(', ', $attachmentNames) : '(none)');
 		$debug .= '<br>Parsed lines: '.count($lines);
+		$debug .= '<br>Minimum-valid-order gate: '.(empty($minimumOrderErrors) ? 'PASS' : 'FAIL ('.dol_escape_htmltag(implode(', ', $minimumOrderErrors)).')');
 
 		if ($existingOrderId !== null) {
 			if ($existingOrderId > 0) {
@@ -571,6 +579,60 @@ class ActionsEmail2Order extends CommonHookActions
 
 		$timestamp = $dateValue !== '' ? strtotime($dateValue) : false;
 		return $timestamp !== false ? $timestamp : dol_now();
+	}
+
+	/**
+	 * Enforce the minimum normalized order shape before creating any draft.
+	 *
+	 * @param int $supplierId Resolved supplier id
+	 * @param array<string,mixed> $parsed Parsed normalized order
+	 * @return string[] Validation error codes; empty when the order may be created
+	 */
+	private function getMinimumOrderValidationErrors(int $supplierId, array $parsed): array
+	{
+		$errors = array();
+		if ($supplierId <= 0) {
+			$errors[] = 'supplier';
+		}
+
+		if (trim((string) ($parsed['supplier_reference'] ?? '')) === '') {
+			$errors[] = 'supplier_reference';
+		}
+
+		$currency = strtoupper(trim((string) ($parsed['currency'] ?? '')));
+		if (preg_match('/^[A-Z]{3}$/', $currency) !== 1) {
+			$errors[] = 'currency';
+		}
+
+		$hasValidLine = false;
+		foreach ((array) ($parsed['lines'] ?? array()) as $line) {
+			if (!is_array($line)) {
+				continue;
+			}
+
+			$qty = isset($line['qty']) ? (float) $line['qty'] : 0.0;
+			if ($qty <= 0) {
+				continue;
+			}
+			if (!array_key_exists('unit_price', $line) || !is_numeric($line['unit_price']) || (float) $line['unit_price'] < 0) {
+				continue;
+			}
+
+			$identity = trim((string) ($line['supplier_product_ref'] ?? ''));
+			$identity .= trim((string) ($line['manufacturer_ref'] ?? ''));
+			$identity .= trim((string) ($line['label'] ?? ''));
+			if ($identity === '') {
+				continue;
+			}
+
+			$hasValidLine = true;
+			break;
+		}
+		if (!$hasValidLine) {
+			$errors[] = 'valid_line';
+		}
+
+		return $errors;
 	}
 
 	/**
