@@ -266,6 +266,7 @@ class ActionsEmail2Order extends CommonHookActions
 		foreach ($lines as $index => $line) {
 			$qty = isset($line['qty']) ? (float) $line['qty'] : 0.0;
 			$supplierRef = trim((string) ($line['supplier_product_ref'] ?? ''));
+			$manufacturerRef = trim((string) ($line['manufacturer_ref'] ?? ''));
 			$unit = trim((string) ($line['unit'] ?? ''));
 			$unitPrice = isset($line['unit_price']) ? (float) $line['unit_price'] : 0.0;
 			$vatRate = isset($line['vat_rate']) ? (float) $line['vat_rate'] : 0.0;
@@ -284,8 +285,11 @@ class ActionsEmail2Order extends CommonHookActions
 			}
 
 			$lineText = '#'.($index + 1)
-				.' ref='.(($supplierRef !== '') ? $supplierRef : '(none)')
-				.' | qty='.$qty.(($unit !== '') ? ' '.$unit : '')
+				.' ref='.(($supplierRef !== '') ? $supplierRef : '(none)');
+			if ($manufacturerRef !== '') {
+				$lineText .= ' | manufacturer ref='.$manufacturerRef;
+			}
+			$lineText .= ' | qty='.$qty.(($unit !== '') ? ' '.$unit : '')
 				.' | net unit='.$unitPrice.(($currency !== '') ? ' '.$currency : '')
 				.' | VAT='.$vatRate.'%'
 				.' | '.$matchText;
