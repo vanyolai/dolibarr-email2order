@@ -229,6 +229,56 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 			}
 		}
 
+		if ($id === 'overgate') {
+			// Overgate/B2Shop forwarded confirmations flatten the product table as:
+			//   Termék | Terméknév | Db | Nettó/db | Nettó össz
+			// Restrict parsing to that table and stop before Nettó részösszeg. Each
+			// accepted row must end in quantity + net unit price + net line total.
+			$headerMatch = array();
+			if (preg_match('/term[eé]k\\s+term[eé]kn[eé]v\\s+db\\s+nett[oó]\\s*\\/\\s*db\\s+nett[oó]\\s+[oö]ssz/iu', $flat, $headerMatch, PREG_OFFSET_CAPTURE)) {
+				$headerText = (string) ($headerMatch[0][0] ?? '');
+				$headerOffset = (int) ($headerMatch[0][1] ?? -1);
+				if ($headerText !== '' && $headerOffset >= 0) {
+					$tableText = substr($flat, $headerOffset + strlen($headerText));
+					$summaryOffset = preg_match('/nett[oó]\\s+r[eé]sz[oö]sszeg/iu', $tableText, $summaryMatch, PREG_OFFSET_CAPTURE)
+						? (int) ($summaryMatch[0][1] ?? -1)
+						: -1;
+					if ($summaryOffset >= 0) {
+						$tableText = substr($tableText, 0, $summaryOffset);
+					}
+
+					$amountPattern = '([0-9]+(?:[.,][0-9]+)?|[0-9]{1,3}(?:\\s[0-9]{3})+(?:[.,][0-9]+)?)';
+					$rowPattern = '/(?:^|\\s)([A-Z0-9][A-Z0-9._\\/-]*)\\s+(.+?)\\s+(?:__\\s*)?([0-9]+(?:[.,][0-9]+)?)\\s+'
+						.$amountPattern.'\\s*(?:Ft|HUF)\\s+'
+						.$amountPattern.'\\s*(?:Ft|HUF)(?=\\s|$)/iu';
+					$matches = array();
+					if (preg_match_all($rowPattern, $tableText, $matches, PREG_SET_ORDER)) {
+						$lines = array();
+						foreach ($matches as $match) {
+							$ref = trim((string) ($match[1] ?? ''));
+							$label = $this->extractor->normalizeText((string) ($match[2] ?? ''));
+							$qty = $this->parseQuantity((string) ($match[3] ?? ''));
+							$unitPrice = $this->parseMoney((string) ($match[4] ?? ''), 'auto');
+							$lineTotal = $this->parseMoney((string) ($match[5] ?? ''), 'auto');
+							if ($ref === '' || $label === '' || $qty <= 0 || $unitPrice < 0 || $lineTotal < 0) {
+								continue;
+							}
+							$lines[] = array(
+								'supplier_product_ref' => $ref,
+								'manufacturer_ref' => '',
+								'label' => $label,
+								'qty' => $qty,
+								'unit' => 'db',
+								'unit_price' => $unitPrice,
+								'vat_rate' => isset($profile['default_vat']) ? (float) $profile['default_vat'] : 0.0,
+							);
+						}
+						return $lines;
+					}
+				}
+			}
+		}
+
 		if ($id === 'delton') {
 			// Delton forwarded confirmations flatten the original table as:
 			//   Mennyiség | M.e. | Terméknév | Egységár | Összár
@@ -479,7 +529,9 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 			'manufacturer_ref' => $manufacturerRef,
 			'label' => $this->cleanupLabel($productText, (array) ($profile['label_strip_patterns'] ?? array())),
 			'qty' => $qty,
-			'unit' => $unitText !== '' ? $this->cleanupUnit($unitText) : $this->extractUnitFromQuantity($qtyText),
+			'unit' => $unitText !== ''
+				? $this->cleanupUnit($unitText)
+				: ((string) ($profile['default_unit'] ?? '') !== '' ? (string) $profile['default_unit'] : $this->extractUnitFromQuantity($qtyText)),
 			'unit_price' => $unitPrice,
 			'vat_rate' => $vatRate,
 		);
@@ -645,15 +697,15 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 				'subject_hints' => array('sikeres megrendelés', 'sikeres megrendeles'),
 				'supplier_reference_regexes' => array(
 					'Sikeres megrendel[eé]s\\s*\\(([0-9]+)\\)',
+					'Rendel[eé]ssz[aá]m\\s*[:#]?\\s*([0-9]+)',
 					'Megrendel[eé]s(?:\\s+sz[aá]ma)?\\s*[:#]?\\s*([0-9]+)',
 				),
-				'order_date_regexes' => array(),
-				// The exact B2Shop confirmation row layout is intentionally left
-				// unspecified until we have a real message body. This profile still
-				// gives deterministic supplier identity, order reference and currency
-				// without weakening the minimum-valid-order gate.
-				'table_header_patterns' => array('__EMAIL2ORDER_OVERGATE_ROWS_PENDING__'),
-				'columns' => array(),
+				'order_date_regexes' => array('Megrendelve\\s*([0-9]{4}\\.[0-9]{2}\\.[0-9]{2}\\.\\s*[0-9]{2}:[0-9]{2})'),
+				'table_header_patterns' => array('^Term[eé]k$', 'Term[eé]kn[eé]v', '^Db$', 'Nett[oó]\\s*\\/\\s*db', 'Nett[oó]\\s+[oö]ssz'),
+				'fixed_columns' => array('product' => 1, 'qty' => 2, 'unit_price' => 3),
+				'product_ref_regex' => '^([A-Z0-9][A-Z0-9._\\/-]*)\\b',
+				'label_strip_patterns' => array('^[A-Z0-9][A-Z0-9._\\/-]*\\s*'),
+				'default_unit' => 'db',
 				'default_vat' => 27.0,
 				'number_format' => 'auto',
 				'currency' => 'HUF',
