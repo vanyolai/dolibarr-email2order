@@ -639,6 +639,26 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 				'currency' => 'HUF',
 			),
 			array(
+				'id' => 'overgate',
+				'domains' => array('overgate.hu'),
+				'canonical_sender' => 'info@overgate.hu',
+				'subject_hints' => array('sikeres megrendelés', 'sikeres megrendeles'),
+				'supplier_reference_regexes' => array(
+					'Sikeres megrendel[eé]s\\s*\\(([0-9]+)\\)',
+					'Megrendel[eé]s(?:\\s+sz[aá]ma)?\\s*[:#]?\\s*([0-9]+)',
+				),
+				'order_date_regexes' => array(),
+				// The exact B2Shop confirmation row layout is intentionally left
+				// unspecified until we have a real message body. This profile still
+				// gives deterministic supplier identity, order reference and currency
+				// without weakening the minimum-valid-order gate.
+				'table_header_patterns' => array('__EMAIL2ORDER_OVERGATE_ROWS_PENDING__'),
+				'columns' => array(),
+				'default_vat' => 27.0,
+				'number_format' => 'auto',
+				'currency' => 'HUF',
+			),
+			array(
 				'id' => 'delton',
 				'domains' => array('delton.hu'),
 				'canonical_sender' => 'rendel@delton.hu',
