@@ -701,7 +701,7 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 					'Megrendel[eé]s(?:\\s+sz[aá]ma)?\\s*[:#]?\\s*([0-9]+)',
 				),
 				'order_date_regexes' => array('Megrendelve\\s*([0-9]{4}\\.[0-9]{2}\\.[0-9]{2}\\.\\s*[0-9]{2}:[0-9]{2})'),
-				'table_header_patterns' => array('^Term[eé]k$', 'Term[eé]kn[eé]v', '^Db$', 'Nett[oó]\\s*\\/\\s*db', 'Nett[oó]\\s+[oö]ssz'),
+				'table_header_patterns' => array('Term[eé]k', 'Term[eé]kn[eé]v', '\\bDb\\b', 'Nett[oó]\\s*\\/\\s*db', 'Nett[oó]\\s+[oö]ssz'),
 				'fixed_columns' => array('product' => 1, 'qty' => 2, 'unit_price' => 3),
 				'product_ref_regex' => '^([A-Z0-9][A-Z0-9._\\/-]*)\\b',
 				'label_strip_patterns' => array('^[A-Z0-9][A-Z0-9._\\/-]*\\s*'),
