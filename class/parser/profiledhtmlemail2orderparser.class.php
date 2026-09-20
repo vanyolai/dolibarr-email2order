@@ -260,7 +260,18 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 					if (preg_match_all($rowPattern, $tableText, $matches, PREG_SET_ORDER)) {
 						$lines = array();
 						foreach ($matches as $match) {
-							$label = $this->extractor->normalizeText((string) ($match[1] ?? ''));
+							$productPrefix = $this->extractor->normalizeText((string) ($match[1] ?? ''));
+							$supplierRef = '';
+							$label = $productPrefix;
+							$prefixParts = array();
+							if (preg_match('/^([A-Z0-9][A-Z0-9._\\/-]*(?:\\s+[A-Z0-9][A-Z0-9._\\/-]*)*)\\s+(.+)$/u', $productPrefix, $prefixParts)) {
+								$candidateRef = trim((string) ($prefixParts[1] ?? ''));
+								$candidateLabel = $this->extractor->normalizeText((string) ($prefixParts[2] ?? ''));
+								if ($candidateRef !== '' && $candidateLabel !== '' && preg_match('/[0-9]/', $candidateRef)) {
+									$supplierRef = $candidateRef;
+									$label = $candidateLabel;
+								}
+							}
 							$qty = $this->parseQuantity((string) ($match[3] ?? ''));
 							$unit = $this->cleanupUnit((string) ($match[4] ?? ''));
 							$unitPrice = $this->parseMoney((string) ($match[5] ?? ''), 'auto');
@@ -269,7 +280,7 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 								continue;
 							}
 							$lines[] = array(
-								'supplier_product_ref' => '',
+								'supplier_product_ref' => $supplierRef,
 								'manufacturer_ref' => '',
 								'label' => $label,
 								'qty' => $qty,
