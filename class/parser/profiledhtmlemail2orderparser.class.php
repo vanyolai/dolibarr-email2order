@@ -252,7 +252,7 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 						$tableText = substr($tableText, 0, $summaryOffset);
 					}
 
-					$amountPattern = '([0-9]+(?:\\s[0-9]{3})*(?:[.,][0-9]{1,2})?)';
+					$amountPattern = '([0-9]+(?:\\s[0-9]{3})*(?:\\s*[.,]\\s*[0-9]{1,2})?)';
 					$rowPattern = '/(?:^|\\s)(.+?)\\s+([0-9]{4}-[0-9]{2}-[0-9]{2})\\s+([0-9]+(?:[.,][0-9]+)?)\\s+(\\p{L}+(?:\\.)?)\\s+'
 						.$amountPattern.'\\s*(?:Ft|HUF)\\s+'
 						.$amountPattern.'\\s*(?:Ft|HUF)(?=\\s|$)/iu';
