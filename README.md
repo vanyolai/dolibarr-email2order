@@ -2,7 +2,7 @@
 
 Email2Order is an external module for Dolibarr 23.x that turns supplier order-confirmation emails collected by Dolibarr's built-in Email Collector into draft supplier orders (`CommandeFournisseur`).
 
-> Status: early bootstrap / proof of concept. The generic parser creates the supplier-order header and preserves the source email. Supplier-specific line parsers will be added from real confirmation samples.
+> Status: active development. Known supplier confirmation formats are handled by supplier-specific parsers. Unknown formats are reported as `unsupported` and are blocked by the minimum-valid-order gate.
 
 ## Design
 
@@ -74,12 +74,9 @@ If no supplier can be identified, processing fails intentionally and no order is
 
 ## Current parser behavior
 
-The generic parser currently extracts:
+Email2Order uses supplier-specific parsers for known confirmation formats. The current profiles include MILE, DSC, POWER Biztonságtechnika, Daniella, Delton, Overgate and RIEL.
 
-- original sender email from forwarded content when possible;
-- a conservative supplier confirmation/reference number from subject/body when a recognizable `order`, `confirmation`, `visszaigazolás`, or `rendelés` label is present.
-
-It does not yet guess arbitrary line-item tables. The first real supplier confirmation will be used to implement the first supplier-specific parser.
+If no known parser claims a message, the facade reports the parser as `unsupported`. It may still extract limited diagnostic metadata such as the original forwarded sender or a likely reference number, but it never guesses arbitrary line-item tables. The minimum-valid-order gate therefore prevents an unsupported message from creating a supplier order.
 
 ## Idempotency
 
