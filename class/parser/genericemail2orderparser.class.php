@@ -11,7 +11,7 @@
 class GenericEmail2OrderParser implements Email2OrderParserInterface
 {
 	/** @var string Effective parser identifier */
-	private $activeParserName = 'generic';
+	private $activeParserName = 'unsupported';
 
 	/** @inheritdoc */
 	public function supports(array $message): bool
@@ -50,7 +50,7 @@ class GenericEmail2OrderParser implements Email2OrderParserInterface
 			}
 		}
 
-		$this->activeParserName = 'generic';
+		$this->activeParserName = 'unsupported';
 		$subject = (string) ($message['subject'] ?? '');
 		$body = (string) ($message['body'] ?? '');
 		$header = (string) ($message['header'] ?? '');
