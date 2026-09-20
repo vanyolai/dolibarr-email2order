@@ -172,6 +172,7 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 			}
 
 			$productText = $this->cellText($cells, (int) ($columns['product'] ?? -1));
+			$labelText = $this->cellText($cells, (int) ($columns['label'] ?? -1));
 			$qtyText = $this->cellText($cells, (int) ($columns['qty'] ?? -1));
 			$unitText = $this->cellText($cells, (int) ($columns['unit'] ?? -1));
 			$priceText = $this->cellText($cells, (int) ($columns['unit_price'] ?? -1));
@@ -179,6 +180,9 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 
 			$line = $this->buildLine($productText, $qtyText, $unitText, $priceText, $vatText, $profile);
 			if ($line !== null) {
+				if ($labelText !== '') {
+					$line['label'] = $this->extractor->normalizeText($labelText);
+				}
 				$lines[] = $line;
 			}
 		}
@@ -226,6 +230,57 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 					}
 				}
 				return $lines;
+			}
+		}
+
+		if ($id === 'riel') {
+			// RIEL forwarded confirmations flatten the HTML table as:
+			//   Cikkszám | Termék | Várható kiszállítás | Mennyiség | Egységár | Érték
+			// Use the ISO delivery date and the two Ft amounts as hard row anchors.
+			// When HTML is unavailable, keep the whole product prefix as the label
+			// rather than guessing a possibly space-containing supplier reference.
+			$headerMatch = array();
+			if (preg_match('/cikksz[aá]m\\s+term[eé]k\\s+v[aá]rhat[oó]\\s+kisz[aá]ll[ií]t[aá]s\\s+mennyis[eé]g\\s+egys[eé]g[aá]r\\s+[ée]rt[eé]k/iu', $flat, $headerMatch, PREG_OFFSET_CAPTURE)) {
+				$headerText = (string) ($headerMatch[0][0] ?? '');
+				$headerOffset = (int) ($headerMatch[0][1] ?? -1);
+				if ($headerText !== '' && $headerOffset >= 0) {
+					$tableText = substr($flat, $headerOffset + strlen($headerText));
+					$summaryOffset = preg_match('/\\bterm[eé]kek\\b/iu', $tableText, $summaryMatch, PREG_OFFSET_CAPTURE)
+						? (int) ($summaryMatch[0][1] ?? -1)
+						: -1;
+					if ($summaryOffset >= 0) {
+						$tableText = substr($tableText, 0, $summaryOffset);
+					}
+
+					$amountPattern = '([0-9]+(?:\\s[0-9]{3})*(?:[.,][0-9]{1,2})?)';
+					$rowPattern = '/(?:^|\\s)(.+?)\\s+([0-9]{4}-[0-9]{2}-[0-9]{2})\\s+([0-9]+(?:[.,][0-9]+)?)\\s+(\\p{L}+(?:\\.)?)\\s+'
+						.$amountPattern.'\\s*(?:Ft|HUF)\\s+'
+						.$amountPattern.'\\s*(?:Ft|HUF)(?=\\s|$)/iu';
+					$matches = array();
+					if (preg_match_all($rowPattern, $tableText, $matches, PREG_SET_ORDER)) {
+						$lines = array();
+						foreach ($matches as $match) {
+							$label = $this->extractor->normalizeText((string) ($match[1] ?? ''));
+							$qty = $this->parseQuantity((string) ($match[3] ?? ''));
+							$unit = $this->cleanupUnit((string) ($match[4] ?? ''));
+							$unitPrice = $this->parseMoney((string) ($match[5] ?? ''), 'auto');
+							$lineTotal = $this->parseMoney((string) ($match[6] ?? ''), 'auto');
+							if ($label === '' || $qty <= 0 || $unit === '' || $unitPrice < 0 || $lineTotal < 0) {
+								continue;
+							}
+							$lines[] = array(
+								'supplier_product_ref' => '',
+								'manufacturer_ref' => '',
+								'label' => $label,
+								'qty' => $qty,
+								'unit' => $unit,
+								'unit_price' => $unitPrice,
+								'vat_rate' => isset($profile['default_vat']) ? (float) $profile['default_vat'] : 0.0,
+							);
+						}
+						return $lines;
+					}
+				}
 			}
 		}
 
@@ -688,6 +743,23 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 				'columns' => array('product' => '^Term[eé]k$', 'unit_price' => 'Nett[oó] egys[eé]g[aá]r', 'vat' => '^[ÁA]fa$', 'qty' => 'Mennyis[eé]g'),
 				'product_ref_is_product_cell' => true,
 				'number_format' => 'comma_thousands',
+				'currency' => 'HUF',
+			),
+			array(
+				'id' => 'riel',
+				'domains' => array('riel.hu'),
+				'canonical_sender' => 'rendeles@riel.hu',
+				'subject_hints' => array('rendelés -', 'rendeles -'),
+				'supplier_reference_regexes' => array(
+					'\\b([0-9]{4}-RN\\/[0-9]+)\\b',
+					'Azonos[ií]t[oó]\\s*:\\s*([0-9]{4}-RN\\/[0-9]+)',
+				),
+				'order_date_regexes' => array(),
+				'table_header_patterns' => array('Cikksz[aá]m', 'Term[eé]k', 'V[aá]rhat[oó]\\s+kisz[aá]ll[ií]t[aá]s', 'Mennyis[eé]g', 'Egys[eé]g[aá]r', '[ÉE]rt[eé]k'),
+				'fixed_columns' => array('product' => 0, 'label' => 1, 'qty' => 3, 'unit_price' => 4),
+				'product_ref_is_product_cell' => true,
+				'default_vat' => 27.0,
+				'number_format' => 'auto',
 				'currency' => 'HUF',
 			),
 			array(
