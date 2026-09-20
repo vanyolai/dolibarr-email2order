@@ -550,13 +550,13 @@ class ActionsEmail2Order extends CommonHookActions
 
 	/**
 	 * @param string $messageHash SHA-256 fingerprint
-	 * @return int 0 not found, >0 supplier order id, -1 SQL error
+	 * @return int 0 not found/stale marker removed, >0 supplier order id, -1 SQL error
 	 */
 	private function findExistingImport(string $messageHash): int
 	{
 		global $conf;
 
-		$sql = 'SELECT fk_supplier_order FROM '.MAIN_DB_PREFIX.'email2order_import';
+		$sql = 'SELECT rowid, fk_supplier_order FROM '.MAIN_DB_PREFIX.'email2order_import';
 		$sql .= ' WHERE entity = '.((int) $conf->entity);
 		$sql .= " AND message_hash = '".$this->db->escape($messageHash)."'";
 
@@ -565,7 +565,31 @@ class ActionsEmail2Order extends CommonHookActions
 			return -1;
 		}
 		$obj = $this->db->fetch_object($resql);
-		return $obj ? (int) $obj->fk_supplier_order : 0;
+		if (!$obj) {
+			return 0;
+		}
+
+		$orderId = (int) $obj->fk_supplier_order;
+		$order = new CommandeFournisseur($this->db);
+		$fetchResult = $order->fetch($orderId);
+		if ($fetchResult > 0) {
+			return $orderId;
+		}
+		if ($fetchResult < 0) {
+			return -1;
+		}
+
+		// The order was deleted after import. Remove the stale dedupe marker so
+		// the same supplier confirmation can be imported again.
+		$sql = 'DELETE FROM '.MAIN_DB_PREFIX.'email2order_import';
+		$sql .= ' WHERE rowid = '.((int) $obj->rowid);
+		$sql .= ' AND entity = '.((int) $conf->entity);
+		if (!$this->db->query($sql)) {
+			return -1;
+		}
+		dol_syslog('Email2Order: removed stale import marker for deleted supplier order id='.$orderId, LOG_INFO);
+
+		return 0;
 	}
 
 	/**
