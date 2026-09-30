@@ -61,9 +61,12 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 			$htmlBody = $GLOBALS['htmlmsg'];
 		}
 
-		$tables = $this->extractor->extractTables($htmlBody);
-		$tableMatch = $this->extractor->findTableByHeaderPatterns($tables, (array) ($profile['table_header_patterns'] ?? array()));
-		$lines = $tableMatch !== null ? $this->parseHtmlLines($tableMatch, $profile) : array();
+		$lines = array();
+		if (empty($profile['plain_text_only'])) {
+			$tables = $this->extractor->extractTables($htmlBody);
+			$tableMatch = $this->extractor->findTableByHeaderPatterns($tables, (array) ($profile['table_header_patterns'] ?? array()));
+			$lines = $tableMatch !== null ? $this->parseHtmlLines($tableMatch, $profile) : array();
+		}
 
 		// Forwarding clients may flatten the supplier's HTML table. Fall back only
 		// to deterministic profile-specific text rules; never guess arbitrary rows.
@@ -202,6 +205,40 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 		$id = (string) ($profile['id'] ?? '');
 		$flat = preg_replace('/\s+/u', ' ', str_replace("\xC2\xA0", ' ', $text));
 		$flat = is_string($flat) ? trim($flat) : trim($text);
+
+		if ($id === 'wago') {
+			// WAGO confirmations use one nested block per item instead of a normal
+			// header table. Each block contains: Cikkszám, description, displayed
+			// unit price, quantity/unit and authoritative line total. WAGO notes
+			// that displayed unit prices may be rounded, so reconstruct the effective
+			// unit price from line total / quantity to keep order totals exact.
+			$pattern = '/Cikksz[aá]m\\s*:\\s*([A-Z0-9][A-Z0-9._\\/-]*)\\s+(.+?)\\s+[ÁA]tad[aá]si\\s+[áa]r\\s*\\/\\s*darab\\*?\\s*:\\s*([0-9][0-9\\s.,]*)\\s*(?:Ft|HUF)\\s+([0-9]+(?:[.,][0-9]+)?)\\s+(\\p{L}+(?:\\.)?)\\s+Teljes\\s+poz[ií]ci[oó]\\s+[ée]rt[eé]k\\s+([0-9][0-9\\s.,]*)\\s*(?:Ft|HUF)/iu';
+			$matches = array();
+			if (preg_match_all($pattern, $flat, $matches, PREG_SET_ORDER)) {
+				$lines = array();
+				foreach ($matches as $match) {
+					$ref = trim((string) ($match[1] ?? ''));
+					$label = $this->extractor->normalizeText((string) ($match[2] ?? ''));
+					$displayedUnitPrice = $this->parseMoney((string) ($match[3] ?? ''), 'auto');
+					$qty = $this->parseQuantity((string) ($match[4] ?? ''));
+					$unit = $this->cleanupUnit((string) ($match[5] ?? ''));
+					$lineTotal = $this->parseMoney((string) ($match[6] ?? ''), 'auto');
+					if ($ref === '' || $label === '' || $qty <= 0 || $unit === '' || $displayedUnitPrice < 0 || $lineTotal < 0) {
+						continue;
+					}
+					$lines[] = array(
+						'supplier_product_ref' => $ref,
+						'manufacturer_ref' => '',
+						'label' => $label,
+						'qty' => $qty,
+						'unit' => $unit,
+						'unit_price' => round($lineTotal / $qty, 6),
+						'vat_rate' => isset($profile['default_vat']) ? (float) $profile['default_vat'] : 0.0,
+					);
+				}
+				return $lines;
+			}
+		}
 
 		if ($id === 'dsc') {
 			// DSC order rows are: product-code, net unit, VAT, gross unit,
@@ -743,6 +780,21 @@ class ProfiledHtmlEmail2OrderParser implements Email2OrderParserInterface
 	private function getProfiles(): array
 	{
 		return array(
+			array(
+				'id' => 'wago',
+				'domains' => array('wago.com'),
+				'canonical_sender' => 'no-reply@wago.com',
+				'subject_hints' => array('megkaptuk rendelését', 'megkaptuk rendeleset', 'wago.com-ról', 'wago.com-rol'),
+				'supplier_reference_regexes' => array(
+					'Megkaptuk\\s+rendel[eé]s[eé]t\\s+(HU[0-9]{6,})\\b',
+					'\\b(HU[0-9]{6,})\\b',
+				),
+				'order_date_regexes' => array(),
+				'plain_text_only' => true,
+				'default_vat' => 27.0,
+				'number_format' => 'auto',
+				'currency' => 'HUF',
+			),
 			array(
 				'id' => 'dsc',
 				'domains' => array('dsc.hu'),
