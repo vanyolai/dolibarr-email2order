@@ -74,7 +74,7 @@ If no supplier can be identified, processing fails intentionally and no order is
 
 ## Current parser behavior
 
-Email2Order uses supplier-specific parsers for known confirmation formats. The current profiles include MILE, DSC, POWER Biztonságtechnika, Daniella, Delton, Overgate and RIEL.
+Email2Order uses supplier-specific parsers for known confirmation formats. The current profiles include MILE, DSC, POWER Biztonságtechnika, Daniella, Delton, Overgate, RIEL and WAGO.
 
 If no known parser claims a message, the facade reports the parser as `unsupported`. It may still extract limited diagnostic metadata such as the original forwarded sender or a likely reference number, but it never guesses arbitrary line-item tables. The minimum-valid-order gate therefore prevents an unsupported message from creating a supplier order.
 
